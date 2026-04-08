@@ -8,7 +8,8 @@ Runs directly on the POS/demo tablet. No SSH, no SCP.
 - Connects to localhost MariaDB
 
 Usage:
-    python deploy_agent_local.py
+    pythonw deploy_agent_local.py   ← no console window (preferred)
+    python  deploy_agent_local.py   ← with console (dev/debug)
 
 Environment variables (in .env next to this file):
     SUPABASE_URL        — Supabase project URL
@@ -24,41 +25,61 @@ Environment variables (in .env next to this file):
     POLL_INTERVAL       — Seconds between polls (default: 5)
 """
 
+import atexit
 import base64
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import time
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import mysql.connector
 import requests
 
 # ---------------------------------------------------------------------------
-# Logging — always write to agent.log next to this script, regardless of how
-# the process was launched (WMI, PsExec, schtasks — stdout redirect unreliable)
+# Paths
 # ---------------------------------------------------------------------------
-LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent.log")
+AGENT_DIR  = os.path.dirname(os.path.abspath(__file__))
+LOG_PATH   = os.path.join(AGENT_DIR, "agent.log")
+PID_FILE   = os.path.join(AGENT_DIR, "agent.pid")
+
+# ---------------------------------------------------------------------------
+# Logging — rotating file (5 × 512 KB) + stdout
+# ---------------------------------------------------------------------------
+_log_handlers = []
+for _attempt in range(6):          # retry up to 3s in case previous instance
+    try:                            # just released the file handle
+        _log_handlers.append(logging.FileHandler(LOG_PATH, mode="a", encoding="utf-8"))
+        break
+    except PermissionError:
+        time.sleep(0.5)
+try:
+    _log_handlers.append(logging.StreamHandler(sys.stdout))
+except Exception:
+    pass  # pythonw has no stdout — that's fine
+
 logging.basicConfig(
     level=logging.INFO,
-    format="%(message)s",
-    handlers=[
-        logging.FileHandler(LOG_PATH, encoding="utf-8"),
-        logging.StreamHandler(sys.stdout),
-    ],
+    format="%(asctime)s %(message)s",
+    datefmt="%H:%M:%S",
+    handlers=_log_handlers,
 )
-log = logging.info
+log     = logging.info
 log_err = logging.error
 
-# Monkey-patch print so existing print() calls also go to the log
+# Monkey-patch print → log so existing print() calls are captured
 import builtins as _builtins
 _orig_print = _builtins.print
 def _log_print(*args, **kwargs):
     kwargs.pop("file", None)
-    _orig_print(*args, **kwargs)
+    try:
+        _orig_print(*args, **kwargs)
+    except Exception:
+        pass
     logging.info(" ".join(str(a) for a in args))
 _builtins.print = _log_print
 
@@ -67,7 +88,7 @@ _builtins.print = _log_print
 # ---------------------------------------------------------------------------
 
 def load_env():
-    env_path = os.path.join(os.path.dirname(__file__), ".env")
+    env_path = os.path.join(AGENT_DIR, ".env")
     if os.path.exists(env_path):
         with open(env_path) as f:
             for line in f:
@@ -78,19 +99,24 @@ def load_env():
 
 load_env()
 
-SUPABASE_URL  = os.environ.get("SUPABASE_URL", "")
-SUPABASE_KEY  = os.environ.get("SUPABASE_KEY", "")
-DB_HOST       = os.environ.get("DB_HOST", "localhost")
-DB_PORT       = int(os.environ.get("DB_PORT", "3306"))
-DB_USER       = os.environ.get("DB_USER", "root")
-DB_PASSWORD   = os.environ.get("DB_PASSWORD", "123456")
-DB_NAME       = os.environ.get("DB_NAME", "pecandemodb")
+SUPABASE_URL   = os.environ.get("SUPABASE_URL", "")
+SUPABASE_KEY   = os.environ.get("SUPABASE_KEY", "")
+DB_HOST        = os.environ.get("DB_HOST", "localhost")
+DB_PORT        = int(os.environ.get("DB_PORT", "3306"))
+DB_USER        = os.environ.get("DB_USER", "root")
+DB_PASSWORD    = os.environ.get("DB_PASSWORD", "123456")
+DB_NAME        = os.environ.get("DB_NAME", "pecandemodb")
 POS_IMAGES_DIR = os.environ.get("POS_IMAGES_DIR", r"C:\Program Files\Pecan Solutions\Pecan POS\images")
-POS_DIR       = os.environ.get("POS_DIR", r"C:\Program Files\Pecan Solutions\Pecan POS")
-POS_EXE       = os.environ.get("POS_EXE", r"C:\Program Files\Pecan Solutions\Pecan POS\Pecan POS.exe")
-PSEXEC_PATH   = os.environ.get("PSEXEC_PATH", r"C:\tools\PsExec64.exe")
-RESTART_VBS   = os.environ.get("RESTART_VBS", r"C:\restart_pos.vbs")
-POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "5"))
+POS_DIR        = os.environ.get("POS_DIR",        r"C:\Program Files\Pecan Solutions\Pecan POS")
+POS_EXE        = os.environ.get("POS_EXE",        r"C:\Program Files\Pecan Solutions\Pecan POS\Pecan POS.exe")
+PSEXEC_PATH    = os.environ.get("PSEXEC_PATH",    r"C:\tools\PsExec64.exe")
+RESTART_VBS    = os.environ.get("RESTART_VBS",    r"C:\restart_pos.vbs")
+POLL_INTERVAL  = int(os.environ.get("POLL_INTERVAL", "5"))
+
+# How long before a session stuck in "executing" is considered stale
+STALE_EXECUTING_MINUTES = 10
+# Backoff caps: connectivity failures double the sleep up to this ceiling
+BACKOFF_MAX = 60
 
 HEADERS = {
     "apikey": SUPABASE_KEY,
@@ -100,6 +126,61 @@ HEADERS = {
     "Accept-Profile": "demo_builder",
     "Content-Profile": "demo_builder",
 }
+
+# ---------------------------------------------------------------------------
+# Single-instance guard (PID file)
+# ---------------------------------------------------------------------------
+
+def _is_pid_running(pid: int) -> bool:
+    try:
+        result = subprocess.run(
+            ["tasklist", "/fi", f"pid eq {pid}", "/fo", "csv", "/nh"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return str(pid) in result.stdout
+    except Exception:
+        return False
+
+def acquire_instance_lock():
+    """Exit immediately if another copy of this agent is already running."""
+    if os.path.exists(PID_FILE):
+        try:
+            old_pid = int(open(PID_FILE).read().strip())
+            if _is_pid_running(old_pid):
+                # Another real instance is live — bail out silently
+                sys.exit(0)
+        except Exception:
+            pass  # stale/corrupt PID file — overwrite it
+
+    with open(PID_FILE, "w") as f:
+        f.write(str(os.getpid()))
+
+def release_instance_lock():
+    try:
+        os.remove(PID_FILE)
+    except Exception:
+        pass
+
+# ---------------------------------------------------------------------------
+# Connectivity backoff state
+# ---------------------------------------------------------------------------
+_fail_streak = 0
+_current_sleep = POLL_INTERVAL
+
+def _on_supabase_ok():
+    global _fail_streak, _current_sleep
+    if _fail_streak > 0:
+        print(f"[CONN] Supabase reconnected after {_fail_streak} failed poll(s)")
+    _fail_streak = 0
+    _current_sleep = POLL_INTERVAL
+
+def _on_supabase_fail():
+    global _fail_streak, _current_sleep
+    _fail_streak += 1
+    _current_sleep = min(BACKOFF_MAX, POLL_INTERVAL * (2 ** min(_fail_streak - 1, 4)))
+    # Only log once per streak + every 12 failures to avoid spam
+    if _fail_streak == 1 or _fail_streak % 12 == 0:
+        print(f"[CONN] Supabase unreachable (streak={_fail_streak}), backing off to {_current_sleep}s")
 
 # ---------------------------------------------------------------------------
 # Supabase helpers
@@ -128,15 +209,45 @@ def supabase_patch(table, match, data, retries=5, backoff=4):
                 raise
 
 # ---------------------------------------------------------------------------
+# Stale session recovery
+# ---------------------------------------------------------------------------
+
+def recover_stale_sessions():
+    """
+    On startup: reset any sessions stuck in 'executing' for longer than
+    STALE_EXECUTING_MINUTES. These were left behind by a previous crash.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=STALE_EXECUTING_MINUTES)).isoformat()
+    try:
+        rows = supabase_get("sessions", {
+            "deploy_status": "eq.executing",
+            "updated_at":    f"lt.{cutoff}",
+            "select":        "id,updated_at",
+        })
+        for row in rows:
+            print(f"[RECOVERY] Resetting stale session {row['id'][:8]} "
+                  f"(stuck executing since {row['updated_at'][:16]})")
+            supabase_patch("sessions", {"id": f"eq.{row['id']}"}, {
+                "deploy_status": "queued",
+                "updated_at":    datetime.now(timezone.utc).isoformat(),
+            })
+        if rows:
+            print(f"[RECOVERY] Reset {len(rows)} stale session(s) → queued")
+    except Exception as e:
+        print(f"[RECOVERY] Could not check stale sessions: {e}")
+
+# ---------------------------------------------------------------------------
 # SQL Execution
 # ---------------------------------------------------------------------------
 
 def execute_sql(sql, deploy_target=None):
-    host     = deploy_target.get("host", DB_HOST)     if deploy_target else DB_HOST
-    port     = deploy_target.get("port", DB_PORT)     if deploy_target else DB_PORT
-    user     = deploy_target.get("user", DB_USER)     if deploy_target else DB_USER
+    # Local agent always connects to localhost — deploy_target.host is the remote
+    # Tailscale/LAN address (used by the SSH agent) and will fail if Tailscale drops.
+    host     = DB_HOST  # always localhost
+    port     = deploy_target.get("port",     DB_PORT)     if deploy_target else DB_PORT
+    user     = deploy_target.get("user",     DB_USER)     if deploy_target else DB_USER
     password = deploy_target.get("password", DB_PASSWORD) if deploy_target else DB_PASSWORD
-    database = deploy_target.get("database", DB_NAME) if deploy_target else DB_NAME
+    database = deploy_target.get("database", DB_NAME)     if deploy_target else DB_NAME
 
     conn = mysql.connector.connect(
         host=host, port=port, user=user, password=password,
@@ -180,7 +291,6 @@ def push_images_local(pending_images):
             if not image_url or not dest_path:
                 continue
 
-            # Decode or download image bytes
             if image_url.startswith("data:"):
                 _, b64_data = image_url.split(",", 1)
                 raw_bytes = base64.b64decode(b64_data)
@@ -189,7 +299,6 @@ def push_images_local(pending_images):
                 r.raise_for_status()
                 raw_bytes = r.content
 
-            # Build local path
             local_path = os.path.join(POS_IMAGES_DIR, dest_path.replace("/", "\\"))
             os.makedirs(os.path.dirname(local_path), exist_ok=True)
 
@@ -226,25 +335,16 @@ def ensure_restart_vbs():
 
 
 def update_appsettings(db_name):
-    """Switch the database in appsettings.json using PowerShell."""
+    """Switch the database in appsettings.json using Python (regex replace)."""
     appsettings = os.path.join(POS_DIR, r"resources\api\appsettings.json")
     if not os.path.exists(appsettings):
         print(f"  [POS] appsettings.json not found at {appsettings}")
         return
-    ps = (
-        f"(Get-Content '{appsettings}') "
-        f"-replace 'Database=[^;]+?(?=[;\\\"])', 'Database={db_name}' "
-        f"| Set-Content '{appsettings}'"
-    )
     try:
-        result = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-Command", ps],
-            capture_output=True, text=True, timeout=15,
-        )
-        if result.returncode == 0:
-            print(f"  [POS] appsettings.json → Database={db_name}")
-        else:
-            print(f"  [POS] appsettings update warning: {result.stderr.strip()[:80]}")
+        content = open(appsettings, encoding="utf-8").read()
+        updated = re.sub(r'Database=[^;"]+', f'Database={db_name}', content)
+        open(appsettings, "w", encoding="utf-8").write(updated)
+        print(f"  [POS] appsettings.json → Database={db_name}")
     except Exception as e:
         print(f"  [POS] appsettings update failed: {e}")
 
@@ -266,23 +366,20 @@ def restart_pos_local(db_name=None):
     if db_name:
         update_appsettings(db_name)
 
-    # Kill POS
+    # Kill all POS instances
     try:
         subprocess.run(
             ["taskkill", "/f", "/im", "Pecan POS.exe"],
             capture_output=True, text=True, timeout=10,
         )
-        print("  [POS] Killed POS process")
+        print("  [POS] Killed POS process(es)")
     except Exception as e:
         print(f"  [POS] taskkill: {e}")
 
     time.sleep(2)
-
-    # Ensure VBS launcher
     ensure_restart_vbs()
 
-    # Launch via PsExec into interactive session 1, elevated
-    # Even running locally, we need -i 1 so the Electron app gets the display
+    # Launch via PsExec into interactive session 1, elevated, detached
     try:
         r = subprocess.run(
             [PSEXEC_PATH, "-accepteula", "-i", "1", "-h", "-d",
@@ -337,10 +434,11 @@ def process_queued():
     try:
         rows = supabase_get("sessions", {
             "deploy_status": "eq.queued",
-            "select": "id,generated_sql,pending_images,deploy_target",
+            "select":        "id,generated_sql,pending_images,deploy_target",
         })
+        _on_supabase_ok()
     except Exception as e:
-        print(f"[POLL] Error checking queue: {e}")
+        _on_supabase_fail()
         return
 
     for session in rows:
@@ -354,10 +452,10 @@ def process_queued():
         try:
             supabase_patch("sessions", {"id": f"eq.{sid}"}, {
                 "deploy_status": "executing",
-                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "updated_at":    datetime.now(timezone.utc).isoformat(),
             })
         except Exception as e:
-            print(f"  [ERROR] Could not update status: {e}")
+            print(f"  [ERROR] Could not claim session: {e}")
             continue
 
         target_db = (deploy_target or {}).get("database", DB_NAME)
@@ -373,20 +471,20 @@ def process_queued():
             pos_result = restart_pos_local(db_name=target_db)
 
             result = {
-                "ok": True,
+                "ok":            True,
                 "rows_affected": rows_affected,
-                "error": None,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "error":         None,
+                "timestamp":     datetime.now(timezone.utc).isoformat(),
                 "images_pushed": images_pushed,
                 "images_failed": images_failed,
                 "pos_restarted": pos_result.get("pos_restarted", False),
-                "pos_running": pos_result.get("pos_running", False),
-                "mode": "local",
+                "pos_running":   pos_result.get("pos_running", False),
+                "mode":          "local",
             }
             supabase_patch("sessions", {"id": f"eq.{sid}"}, {
                 "deploy_status": "done",
                 "deploy_result": json.dumps(result),
-                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "updated_at":    datetime.now(timezone.utc).isoformat(),
             })
             print("  [DONE] Success!")
 
@@ -397,9 +495,10 @@ def process_queued():
                 supabase_patch("sessions", {"id": f"eq.{sid}"}, {
                     "deploy_status": "failed",
                     "deploy_result": json.dumps({
-                        "ok": False, "error": str(e)[:500],
+                        "ok":        False,
+                        "error":     str(e)[:500],
                         "timestamp": datetime.now(timezone.utc).isoformat(),
-                        "mode": "local",
+                        "mode":      "local",
                     }),
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 })
@@ -412,21 +511,29 @@ def main():
         print("ERROR: Set SUPABASE_URL and SUPABASE_KEY in .env")
         sys.exit(1)
 
-    print("Demo Builder Deploy Agent — LOCAL MODE")
+    # ── Single-instance guard ────────────────────────────────────────────────
+    acquire_instance_lock()
+    atexit.register(release_instance_lock)
+
+    print(f"Demo Builder Deploy Agent — LOCAL MODE  (PID {os.getpid()})")
     print(f"  Supabase: {SUPABASE_URL}")
     print(f"  DB:       {DB_HOST}:{DB_PORT}/{DB_NAME}")
     print(f"  Images:   {POS_IMAGES_DIR}")
     print(f"  PsExec:   {PSEXEC_PATH}")
-    print(f"  Polling every {POLL_INTERVAL}s\n")
+    print(f"  Polling every {POLL_INTERVAL}s (backoff up to {BACKOFF_MAX}s on errors)\n")
 
     if not os.path.exists(PSEXEC_PATH):
         print(f"WARNING: PsExec not found at {PSEXEC_PATH} — POS restart will fail")
     if not os.path.exists(POS_IMAGES_DIR):
         print(f"WARNING: POS images dir not found: {POS_IMAGES_DIR}")
 
+    # ── Recover any sessions left executing from a previous crash ────────────
+    recover_stale_sessions()
+
+    # ── Main poll loop ───────────────────────────────────────────────────────
     while True:
         process_queued()
-        time.sleep(POLL_INTERVAL)
+        time.sleep(_current_sleep)
 
 
 if __name__ == "__main__":

@@ -13,11 +13,19 @@ export async function POST(request: Request) {
         styleHints?: string;
       };
 
+    // Extract "Quoted Title" from styleHints → renders as text in sidebar
+    const titleMatch = styleHints?.match(/"([^"]+)"/);
+    const displayTitle = titleMatch?.[1]?.trim() ?? null;
+    const cleanedHints = styleHints
+      ?.replace(/"[^"]*"/g, "")
+      .replace(/,\s*,/g, ",")
+      .trim() || undefined;
+
     const context = [
       restaurantName && `Restaurant: ${restaurantName}`,
       restaurantType && `Type: ${restaurantType}`,
       groups?.length && `Menu groups: ${groups.join(", ")}`,
-      styleHints && `Style notes: ${styleHints}`,
+      cleanedHints && `Style notes: ${cleanedHints}`,
     ]
       .filter(Boolean)
       .join("\n");
@@ -72,52 +80,55 @@ Rules:
 
     // --- Unified: one seamless 1384×716 composition (sidebar + background joined) ---
     if (type === "unified") {
-      const unifiedPrompt = `You are an expert CSS visual designer. Create a single seamless full-screen background for a restaurant POS terminal that spans both the sidebar strip and the main screen.
+      const titleInstruction = displayTitle
+        ? `SIDEBAR TITLE: Render "${displayTitle}" as large display text in the left 360px zone.
+- Choose a Google Font that matches the cuisine/vibe and @import it
+- Font size 52–68px, bold or display weight
+- Position: lower-third or vertically centered
+- Add text-shadow (2–4px blur, dark) so it reads against any background
+- Color: white or a bright accent — must be legible`
+        : `NO text, NO words anywhere in the design.`;
+
+      const unifiedPrompt = `You are an expert CSS visual designer. Create a single seamless full-screen background for a restaurant POS terminal.
 
 ${context}
 
-CANVAS: exactly 1384px wide × 716px tall. Will be rasterized to PNG by html2canvas, then split:
-- LEFT 360px  → sidebar image (360×696, portrait strip on the left of the POS screen)
-- RIGHT 1024px → main background (1024×716, sits behind POS menu buttons)
+CANVAS: exactly 1384px wide × 716px tall. Rasterized to PNG, then split:
+- LEFT 360px  → sidebar strip (portrait, decorative chrome)
+- RIGHT 1024px → main background (POS buttons and menu items sit on top)
 
 OUTPUT: Return a <style> block followed immediately by a single root <div>. No JSON, no markdown — raw HTML only.
 
-CSS CONSTRAINTS (html2canvas):
-- No @import, no external url() — system fonts only
-- Gradients, box-shadow, border-radius, clip-path, transform, opacity all work
-- NO ::before / ::after — not reliably captured by html2canvas
+FONTS: You may @import any Google Font. Pick one that fits the cuisine.
+Font guide:
+- Upscale/fine dining: Playfair Display, Cormorant Garamond
+- BBQ/Southern: Oswald, Arvo
+- Seafood/Coastal: Raleway, Quicksand
+- Italian: Libre Baskerville, Lato
+- Mexican/Latin: Montserrat, Nunito
+- Bakery/Café: Pacifico, Josefin Sans
+- Modern American: Bebas Neue, Roboto Slab
+
+${titleInstruction}
+
+CSS CONSTRAINTS:
+- NO ::before / ::after — not reliably captured
 - Use child divs for all layers
+- Gradients, box-shadow, border-radius, clip-path, transform, opacity all work
 
-DESIGN — THE KEY GOAL IS A SEAMLESS SPLIT:
+DESIGN:
 - Root: <div class="u-root"> — width:1384px; height:716px; overflow:hidden; position:relative
-- Use a horizontal gradient or color wash as the base that flows naturally across the full 1384px width
-- The LEFT 360px can be richer and more saturated (it's decorative chrome)
-- The RIGHT 1024px MUST be very dark and subtle — POS buttons and item text sit on top of it. Max opacity 8–12% for any decorative element on the right side.
-- The seam at x=360 must be INVISIBLE — no hard edge, use gradients that cross it naturally
-- Cuisine-appropriate accent color tied to the restaurant type
+- Derive colors boldly from the restaurant type — saturated, vivid, brand-appropriate
+- LEFT 360px: rich, saturated showcase zone. Large shapes at 40–70% opacity. This is the visual centerpiece.
+- RIGHT 1024px: same color family but much darker and more subdued. POS UI sits on top so keep decorative layers below 15–20% opacity on this side.
+- The seam at x=360 must be INVISIBLE — use gradients that flow naturally across it
+- A base gradient spanning the full 1384px anchors the composition
 
-STRUCTURE APPROACH:
-1. A base gradient div spanning full 1384px width (the foundation)
-2. 2–3 large decorative shapes (circles, diagonal panels) centered in the LEFT zone
-3. 1–2 very-low-opacity echo shapes extending into the RIGHT zone (continuity)
-4. An inset vignette on the right side to keep it dark enough for the POS UI
-
-Example skeleton:
-<style>
-.u-root { width:1384px; height:716px; overflow:hidden; position:relative; background:linear-gradient(105deg,#1e1040 0%,#0f172a 26%,#0a0f1e 100%); }
-.u-base { position:absolute; inset:0; background:linear-gradient(90deg,rgba(99,102,241,0.12) 0%,rgba(99,102,241,0.02) 36%,transparent 60%); }
-.u-orb1 { position:absolute; width:480px; height:480px; border-radius:50%; background:radial-gradient(circle,rgba(139,92,246,0.22),transparent 65%); top:-80px; left:-60px; }
-.u-stripe { position:absolute; inset:0; background:repeating-linear-gradient(118deg,transparent,transparent 28px,rgba(255,255,255,0.015) 28px,rgba(255,255,255,0.015) 29px); }
-.u-vignette { position:absolute; left:360px; top:0; width:1024px; height:716px; box-shadow:inset 0 0 180px rgba(0,0,0,0.55); }
-</style>
-<div class="u-root">
-  <div class="u-base"></div>
-  <div class="u-orb1"></div>
-  <div class="u-stripe"></div>
-  <div class="u-vignette"></div>
-</div>
-
-Make it unique to the restaurant's cuisine and vibe. Be creative with the left sidebar area — that's the showcase. Keep the right area tastefully dark.`;
+STRUCTURE:
+1. Full-width base gradient (the foundation)
+2. 2–4 bold decorative shapes concentrated in the LEFT zone (circles, diagonal panels, arcs)
+3. 1–2 very-low-opacity echo shapes extending into the RIGHT zone for continuity
+4. Inset vignette on the right side to keep it dark for POS UI`;
 
       const msg = await client.messages.create({
         model: "claude-sonnet-4-6",
@@ -139,100 +150,103 @@ Make it unique to the restaurant's cuisine and vibe. Be creative with the left s
       });
     }
 
-    // --- HTML/CSS generation (sidebar or background) ---
-    // Rendered client-side via html2canvas — no external fonts or images (CORS blocked).
-    // Ask for raw HTML (style block + div) — no JSON wrapper to avoid CSS escaping issues.
-    const prompt =
-      type === "sidebar"
-        ? `You are an expert CSS visual designer. Create a richly layered sidebar banner for a restaurant POS terminal.
+    // --- Sidebar ---
+    if (type === "sidebar") {
+      const titleInstruction = displayTitle
+        ? `TITLE TEXT: Render "${displayTitle}" in the sidebar.
+- @import the chosen Google Font and apply it to the title element
+- Font size 52–68px, bold or display weight
+- Position: lower-third (bottom 200px) or vertically centered — whichever suits the composition
+- text-shadow: 0 2px 8px rgba(0,0,0,0.6) for legibility
+- Color: white or a bright accent color that pops`
+        : `NO text, NO words anywhere.`;
+
+      const sidebarPrompt = `You are an expert CSS visual designer. Create a richly layered sidebar banner for a restaurant POS terminal.
 
 ${context}
 
-CANVAS: exactly 360px wide × 696px tall. Will be rasterized to PNG by html2canvas.
+CANVAS: exactly 360px wide × 696px tall. Rasterized to PNG by html2canvas.
 
-OUTPUT: Return a <style> block followed immediately by a single root <div>. No JSON, no markdown, no explanation — raw HTML only.
+OUTPUT: Return a <style> block followed immediately by a single root <div>. No JSON, no markdown — raw HTML only.
 
-CSS CONSTRAINTS (html2canvas):
-- No @import, no external url() — system fonts only (Georgia, Arial, Helvetica, Verdana)
+FONTS: @import any Google Font appropriate to the cuisine.
+Font guide:
+- Upscale/fine dining: Playfair Display, Cormorant Garamond
+- BBQ/Southern: Oswald, Arvo
+- Seafood/Coastal: Raleway, Quicksand
+- Italian: Libre Baskerville, Lato
+- Mexican/Latin: Montserrat, Nunito
+- Bakery/Café: Pacifico, Josefin Sans
+- Modern American: Bebas Neue, Roboto Slab
+
+${titleInstruction}
+
+CSS CONSTRAINTS:
+- NO ::before / ::after — html2canvas limitation
 - Gradients, box-shadow, border-radius, clip-path, transform, opacity all work
-- NO ::before / ::after — html2canvas does not reliably capture pseudo-elements
 
 DESIGN:
-- Root: <div class="sb-root"> with CSS: width:360px; height:696px; overflow:hidden; position:relative; background: <dark base color>
-- Dark, rich base — deep navy, charcoal, dark burgundy, espresso
-- 4–6 child divs creating layered depth: gradient fills, glows, geometric shapes, diagonal cuts
-- Accent color tied to cuisine vibe (amber for Italian, deep red for steakhouse, teal for seafood)
-- Vertical rhythm top-to-bottom through the narrow column
-- Abstract motifs: circles (border-radius:50%), diagonal panels (clip-path:polygon()), arcs — no literal images
-- NO text, NO words
+- Root: <div class="sb-root"> — width:360px; height:696px; overflow:hidden; position:relative
+- This is a SHOWCASE panel. Be bold, vivid, and cuisine-specific. Think: a brand poster compressed into a vertical strip.
+- Derive colors from the restaurant type. Do not default to generic dark blue or purple.
+  Examples: deep coral + ocean teal for seafood, charred black + ember orange for BBQ,
+  cream + tomato red + basil green for Italian, sand + turquoise for coastal/beach
+- 4–6 child divs creating layered depth
+- Foreground shapes: large, at 40–70% opacity for visual punch
+- Background texture: subtle repeating gradient at 5–10% opacity
+- Geometric motifs: large circles (border-radius:50%), diagonal panels (clip-path:polygon()), arcs
+- Vertical rhythm flowing top-to-bottom through the narrow column`;
 
-TECHNIQUES:
-- radial-gradient glows off-center
-- repeating-linear-gradient diagonal stripes at 3–8% opacity
-- clip-path:polygon() for angled panels
-- box-shadow with large blur for halos
-- Overlapping circles at low opacity (10–25%)
+      const msg = await client.messages.create({
+        model: "claude-sonnet-4-6",
+        max_tokens: 8192,
+        messages: [{ role: "user", content: sidebarPrompt }],
+      });
 
-Example structure:
-<style>
-.sb-root { width:360px; height:696px; overflow:hidden; position:relative; background:linear-gradient(180deg,#0f172a,#1e1b4b); }
-.sb-glow { position:absolute; width:400px; height:400px; border-radius:50%; background:radial-gradient(circle,rgba(99,102,241,0.18),transparent 70%); top:-80px; left:-80px; }
-/* more rules... */
-</style>
-<div class="sb-root">
-  <div class="sb-glow"></div>
-  <!-- more layers -->
-</div>`
-        : `You are an expert CSS visual designer. Create a richly layered background for a restaurant POS terminal's main screen.
+      const text = msg.content[0].type === "text" ? msg.content[0].text : "";
+      const stripped = text.replace(/```html?\n?/g, "").replace(/```\n?/g, "").trim();
+      const htmlMatch = stripped.match(/(<style>[\s\S]*?<\/style>\s*)?(<div[\s\S]*<\/div>)/);
+      if (!htmlMatch) {
+        return Response.json({ error: "No HTML found in response", raw: text.slice(0, 500) }, { status: 500 });
+      }
+
+      return Response.json({
+        html: (htmlMatch[1] ?? "") + htmlMatch[2],
+        type: "sidebar",
+        usage: { input_tokens: msg.usage.input_tokens, output_tokens: msg.usage.output_tokens },
+      });
+    }
+
+    // --- Background ---
+    const backgroundPrompt = `You are an expert CSS visual designer. Create a richly layered background for a restaurant POS terminal's main screen.
 
 ${context}
 
-CANVAS: exactly 1024px wide × 716px tall. Will be rasterized to PNG by html2canvas.
+CANVAS: exactly 1024px wide × 716px tall. Rasterized to PNG by html2canvas.
 
-OUTPUT: Return a <style> block followed immediately by a single root <div>. No JSON, no markdown, no explanation — raw HTML only.
+OUTPUT: Return a <style> block followed immediately by a single root <div>. No JSON, no markdown — raw HTML only.
 
-CSS CONSTRAINTS (html2canvas):
-- No @import, no external url() — system fonts only
+CSS CONSTRAINTS:
+- NO ::before / ::after — html2canvas limitation
 - Gradients, box-shadow, border-radius, clip-path, transform, opacity all work
-- NO ::before / ::after — html2canvas does not reliably capture pseudo-elements
 
 DESIGN:
-- Root: <div class="bg-root"> with CSS: width:1024px; height:716px; overflow:hidden; position:relative; background: <very dark base>
-- VERY SUBTLE — POS buttons and text sit on top. Decorative layers max 8–12% opacity.
-- Dark base: #0f172a, #0d1117, or similar
-- 6–8 child divs at varying low opacities for richness
-- Large-scale composition — few big shapes, not many small ones
-- Geometric: circles, arcs, diagonal panels, overlapping rings
+- Root: <div class="bg-root"> — width:1024px; height:716px; overflow:hidden; position:relative
+- POS buttons, item images, and text sit on top of this. Decorative layers should stay below 20% opacity so the UI remains readable.
+- Dark base color — very dark variant of the cuisine accent color (not pure #0f172a every time — use a dark teal for seafood, dark charcoal-red for BBQ, dark espresso for Italian, etc.)
+- 5–7 child divs at varying low opacities
+- Large-scale composition — a few big shapes, not many small ones
+- Geometric: large circles, arcs, diagonal panels — all at low opacity
 - NO text of any kind
-
-TECHNIQUES:
-- Large radial-gradient "light source" off one corner (opacity 0.06–0.10)
-- Diagonal panels via clip-path:polygon() at 2–4% opacity
-- Overlapping large circles with gradient fills at very low opacity
-- repeating-linear-gradient fine texture at 2–3% opacity
-- Inset box-shadow vignette on the root div
-
-Example structure:
-<style>
-.bg-root { width:1024px; height:716px; overflow:hidden; position:relative; background:#0f172a; box-shadow:inset 0 0 120px rgba(0,0,0,0.6); }
-.bg-glow { position:absolute; width:800px; height:800px; border-radius:50%; background:radial-gradient(circle,rgba(99,102,241,0.07),transparent 65%); top:-200px; right:-200px; }
-/* more rules... */
-</style>
-<div class="bg-root">
-  <div class="bg-glow"></div>
-  <!-- more layers -->
-</div>`;
+- Inset box-shadow vignette on the root for depth`;
 
     const msg = await client.messages.create({
       model: "claude-sonnet-4-6",
       max_tokens: 8192,
-      messages: [{ role: "user", content: prompt }],
+      messages: [{ role: "user", content: backgroundPrompt }],
     });
 
-    const text =
-      msg.content[0].type === "text" ? msg.content[0].text : "";
-
-    // Strip markdown fences if present, then extract <style>...<div>...</div>
+    const text = msg.content[0].type === "text" ? msg.content[0].text : "";
     const stripped = text.replace(/```html?\n?/g, "").replace(/```\n?/g, "").trim();
     const htmlMatch = stripped.match(/(<style>[\s\S]*?<\/style>\s*)?(<div[\s\S]*<\/div>)/);
     if (!htmlMatch) {
@@ -242,11 +256,9 @@ Example structure:
       );
     }
 
-    const combined = (htmlMatch[1] ?? "") + htmlMatch[2];
-
     return Response.json({
-      html: combined,
-      type,
+      html: (htmlMatch[1] ?? "") + htmlMatch[2],
+      type: "background",
       usage: {
         input_tokens: msg.usage.input_tokens,
         output_tokens: msg.usage.output_tokens,

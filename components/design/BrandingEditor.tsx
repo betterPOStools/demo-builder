@@ -285,7 +285,7 @@ export function BrandingEditor() {
             <Input
               value={styleHints}
               onChange={(e) => setStyleHints(e.target.value)}
-              placeholder="Style hints: rustic, modern, neon, tropical, elegant, red & gold..."
+              placeholder='Style hints: rustic, tropical, neon... or "Name" to render title in sidebar'
               className="h-8 text-xs"
             />
             <Button

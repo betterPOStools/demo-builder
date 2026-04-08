@@ -24,15 +24,17 @@ export async function htmlToPng(
   container.innerHTML = html;
   document.body.appendChild(container);
 
-  // Give the browser one frame to apply styles from any injected <style> tags
-  await new Promise<void>((r) => requestAnimationFrame(() => r()));
+  // Wait for all fonts (including @import Google Fonts in injected <style> tags)
+  // to fully load and decode before html2canvas captures the frame.
+  await document.fonts.ready;
+  await new Promise<void>((r) => setTimeout(r, 200));
 
   try {
     const canvas = await html2canvas(container, {
       width,
       height,
       scale: 1,
-      useCORS: false,
+      useCORS: true,  // allow cross-origin font resources already loaded by the browser
       logging: false,
       backgroundColor: null,
     });
