@@ -5,6 +5,7 @@ import { MenuEditor } from "./MenuEditor";
 import { ModifierDesigner } from "./ModifierDesigner";
 import { LayoutEditor } from "./LayoutEditor";
 import { BrandingEditor } from "./BrandingEditor";
+import { POSPreview } from "./POSPreview";
 
 export function EditorTabs() {
   return (
@@ -14,6 +15,7 @@ export function EditorTabs() {
         <TabsTrigger value="modifiers">Modifiers</TabsTrigger>
         <TabsTrigger value="layout">Layout</TabsTrigger>
         <TabsTrigger value="branding">Branding</TabsTrigger>
+        <TabsTrigger value="preview">Preview</TabsTrigger>
       </TabsList>
 
       <TabsContent value="menu">
@@ -30,6 +32,10 @@ export function EditorTabs() {
 
       <TabsContent value="branding">
         <BrandingEditor />
+      </TabsContent>
+
+      <TabsContent value="preview">
+        <POSPreview />
       </TabsContent>
     </Tabs>
   );

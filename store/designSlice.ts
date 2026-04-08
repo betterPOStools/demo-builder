@@ -37,6 +37,7 @@ export interface DesignSlice {
   // Group operations
   addGroup: (name: string, category: CategoryName) => void;
   renameGroup: (groupId: string, name: string) => void;
+  updateGroup: (groupId: string, changes: Partial<GroupNode>) => void;
   deleteGroup: (groupId: string) => void;
   moveGroup: (groupId: string, category: CategoryName) => void;
   reorderGroups: (category: CategoryName, groupIds: string[]) => void;
@@ -181,6 +182,14 @@ export const createDesignSlice: StateCreator<DesignSlice> = (set) => ({
     set((state) => ({
       groups: state.groups.map((g) =>
         g.id === groupId ? { ...g, name } : g,
+      ),
+      isDirty: true,
+    })),
+
+  updateGroup: (groupId, changes) =>
+    set((state) => ({
+      groups: state.groups.map((g) =>
+        g.id === groupId ? { ...g, ...changes } : g,
       ),
       isDirty: true,
     })),

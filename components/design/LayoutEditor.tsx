@@ -21,13 +21,50 @@ import {
 } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 import { useStore } from "@/store";
+import { isLightColor } from "@/lib/utils";
 import { LAYOUT_PRESETS } from "@/lib/sql/layout";
+import type { RoomNode } from "@/lib/types";
 
 const PRESET_LIST = Object.entries(LAYOUT_PRESETS).map(([key, p]) => ({
   key,
   name: p.name,
   description: p.description,
 }));
+
+function TableGrid({ room }: { room: RoomNode }) {
+  if (room.tables.length === 0) return null;
+
+  const fg = isLightColor(room.color) ? "#1e293b" : "#ffffff";
+  // Determine grid cols: sqrt-based, max 6
+  const cols = Math.min(6, Math.ceil(Math.sqrt(room.tables.length)));
+
+  return (
+    <div className="mt-2 rounded-lg border border-slate-700/50 bg-slate-900/50 p-2">
+      <div className="mb-1.5 text-[10px] font-medium text-slate-500">
+        Floor Plan
+      </div>
+      <div
+        className="grid gap-1"
+        style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}
+      >
+        {room.tables.map((t) => (
+          <div
+            key={t.id}
+            className="flex flex-col items-center justify-center rounded px-1 py-1.5"
+            style={{ backgroundColor: room.color, color: fg }}
+          >
+            <span className="text-[9px] font-bold leading-tight">
+              {t.name}
+            </span>
+            <span className="text-[8px] opacity-70">
+              {t.seats} {t.isBarStool ? "stools" : "seats"}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 export function LayoutEditor() {
   const rooms = useStore((s) => s.rooms);
@@ -242,6 +279,8 @@ export function LayoutEditor() {
                 <Plus className="mr-1 h-3 w-3" /> Add Table
               </Button>
             </div>
+
+            <TableGrid room={room} />
           </CardContent>
         </Card>
       ))}
