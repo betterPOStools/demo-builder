@@ -251,14 +251,14 @@ BASE LAYER (full canvas):
 
 MIDGROUND LAYERS (3–4 child divs, position:absolute):
 - Large bold shapes: oversized circles (400–700px diameter), diagonal panels via clip-path, sweeping arcs
-- Opacity 65–85% — rich and vivid, this is the visual centerpiece
+- Opacity 100% — fully opaque, maximum visual impact. The display software handles dimming separately.
 - Colors: vivid accent tones from the cuisine palette at full saturation
 - Vary position: bleed off corners and edges for a dynamic composition
 
 FOREGROUND ACCENT (1–2 child divs):
-- Small concentrated accent shapes or a subtle radial glow in one quadrant
-- Opacity 30–50% — adds depth and layering
-- Keep this side lighter so button labels remain readable`;
+- Small concentrated accent shapes or a radial glow in one quadrant
+- Opacity 100% — fully opaque
+- Use a slightly lighter or contrasting accent color for depth`;
 
 
     const msg = await client.messages.create({
