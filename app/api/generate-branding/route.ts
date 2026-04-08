@@ -72,7 +72,7 @@ Rules:
 
     // --- HTML/CSS generation (sidebar or background) ---
     // Rendered client-side via html2canvas — no external fonts or images (CORS blocked).
-    // CSS classes via <style> tag work fine; pseudo-elements (::before/::after) work too.
+    // Ask for raw HTML (style block + div) — no JSON wrapper to avoid CSS escaping issues.
     const prompt =
       type === "sidebar"
         ? `You are an expert CSS visual designer. Create a richly layered sidebar banner for a restaurant POS terminal.
@@ -81,75 +81,78 @@ ${context}
 
 CANVAS: exactly 360px wide × 696px tall. Will be rasterized to PNG by html2canvas.
 
-OUTPUT FORMAT — return a JSON object with two keys:
-{
-  "css": "/* all CSS here — use classes, ::before, ::after, complex selectors */",
-  "html": "<div class=\\"sb-root\\"><!-- child divs using your classes --></div>"
-}
+OUTPUT: Return a <style> block followed immediately by a single root <div>. No JSON, no markdown, no explanation — raw HTML only.
 
-CSS RULES (html2canvas constraints):
-- NO external resources — no @import, no url() pointing to fonts or images
-- System fonts only if needed: Georgia, Palatino, Arial, Helvetica, Verdana, -apple-system
-- CSS gradients, box-shadow, border-radius, clip-path, transform, opacity all work
-- ::before and ::after pseudo-elements work — use them for layered effects
-- CSS variables (--var) work
+CSS CONSTRAINTS (html2canvas):
+- No @import, no external url() — system fonts only (Georgia, Arial, Helvetica, Verdana)
+- Gradients, box-shadow, border-radius, clip-path, transform, opacity all work
+- NO ::before / ::after — html2canvas does not reliably capture pseudo-elements
 
-DESIGN REQUIREMENTS:
-- Root element: .sb-root { width:360px; height:696px; overflow:hidden; position:relative; }
-- Dark, rich base — deep navy (#0f172a), charcoal (#1a1a2e), dark burgundy, espresso, etc.
-- Build DEPTH with 4–8 layered elements: gradient fills, soft glows, geometric shapes, diagonal cuts
-- Accent colors should reflect the cuisine vibe (warm amber for Italian, deep red for steakhouse, teal for seafood, etc.)
-- Vertical rhythm — elements should flow top-to-bottom through the narrow column
-- Abstract culinary motifs at low opacity: circular shapes like plates, diagonal slashes like knife cuts, arc shapes like bowls — all CSS-only, no literal images
-- NO text, NO words, NO labels
+DESIGN:
+- Root: <div class="sb-root"> with CSS: width:360px; height:696px; overflow:hidden; position:relative; background: <dark base color>
+- Dark, rich base — deep navy, charcoal, dark burgundy, espresso
+- 4–6 child divs creating layered depth: gradient fills, glows, geometric shapes, diagonal cuts
+- Accent color tied to cuisine vibe (amber for Italian, deep red for steakhouse, teal for seafood)
+- Vertical rhythm top-to-bottom through the narrow column
+- Abstract motifs: circles (border-radius:50%), diagonal panels (clip-path:polygon()), arcs — no literal images
+- NO text, NO words
 
-TECHNIQUE IDEAS (use several):
-- radial-gradient glows positioned off-center
-- Thin diagonal stripes via repeating-linear-gradient at very low opacity (3-8%)
-- Circle/oval shapes (border-radius:50%) with gradient fills, partially clipped
-- clip-path: polygon() for angled cuts and geometric panels
-- ::before/::after for layered pseudo-elements that don't require extra markup
-- box-shadow with large blur for soft glowing halos
+TECHNIQUES:
+- radial-gradient glows off-center
+- repeating-linear-gradient diagonal stripes at 3–8% opacity
+- clip-path:polygon() for angled panels
+- box-shadow with large blur for halos
+- Overlapping circles at low opacity (10–25%)
 
-Return ONLY the JSON object, no markdown fences, no explanation.`
+Example structure:
+<style>
+.sb-root { width:360px; height:696px; overflow:hidden; position:relative; background:linear-gradient(180deg,#0f172a,#1e1b4b); }
+.sb-glow { position:absolute; width:400px; height:400px; border-radius:50%; background:radial-gradient(circle,rgba(99,102,241,0.18),transparent 70%); top:-80px; left:-80px; }
+/* more rules... */
+</style>
+<div class="sb-root">
+  <div class="sb-glow"></div>
+  <!-- more layers -->
+</div>`
         : `You are an expert CSS visual designer. Create a richly layered background for a restaurant POS terminal's main screen.
 
 ${context}
 
 CANVAS: exactly 1024px wide × 716px tall. Will be rasterized to PNG by html2canvas.
 
-OUTPUT FORMAT — return a JSON object with two keys:
-{
-  "css": "/* all CSS here — use classes, ::before, ::after, complex selectors */",
-  "html": "<div class=\\"bg-root\\"><!-- child divs using your classes --></div>"
-}
+OUTPUT: Return a <style> block followed immediately by a single root <div>. No JSON, no markdown, no explanation — raw HTML only.
 
-CSS RULES (html2canvas constraints):
-- NO external resources — no @import, no url() pointing to fonts or images
-- System fonts only if any text is needed
-- CSS gradients, box-shadow, border-radius, clip-path, transform, opacity all work
-- ::before and ::after pseudo-elements work — use them for layered effects
-- CSS variables (--var) work
+CSS CONSTRAINTS (html2canvas):
+- No @import, no external url() — system fonts only
+- Gradients, box-shadow, border-radius, clip-path, transform, opacity all work
+- NO ::before / ::after — html2canvas does not reliably capture pseudo-elements
 
-DESIGN REQUIREMENTS:
-- Root element: .bg-root { width:1024px; height:716px; overflow:hidden; position:relative; }
-- VERY SUBTLE overall — POS menu buttons and text will sit on top. Decorative elements max 8–12% opacity.
-- Dark base: #0f172a, #0d1117, #111827, or a dark tinted version appropriate to the cuisine
-- Build richness with 6–10 layered elements at varying low opacities
-- Large-scale composition — few large shapes rather than many small ones
-- Geometric language: circles, arcs, diagonal panels, overlapping rings
-- Accent color echoes the restaurant's vibe at very low opacity
+DESIGN:
+- Root: <div class="bg-root"> with CSS: width:1024px; height:716px; overflow:hidden; position:relative; background: <very dark base>
+- VERY SUBTLE — POS buttons and text sit on top. Decorative layers max 8–12% opacity.
+- Dark base: #0f172a, #0d1117, or similar
+- 6–8 child divs at varying low opacities for richness
+- Large-scale composition — few big shapes, not many small ones
+- Geometric: circles, arcs, diagonal panels, overlapping rings
 - NO text of any kind
 
-TECHNIQUE IDEAS (use most of these):
-- A large radial-gradient "light source" off one corner, very subtle (opacity 0.06–0.10)
-- Diagonal panel dividers via clip-path: polygon() at 2–4% opacity
-- Overlapping large circles (border-radius:50%) with gradient fills, very low opacity
-- repeating-linear-gradient for fine diagonal grid or stripe texture at 2–3% opacity
-- ::before/::after for extra layers without extra markup
-- A soft vignette (inset box-shadow) on the root element
+TECHNIQUES:
+- Large radial-gradient "light source" off one corner (opacity 0.06–0.10)
+- Diagonal panels via clip-path:polygon() at 2–4% opacity
+- Overlapping large circles with gradient fills at very low opacity
+- repeating-linear-gradient fine texture at 2–3% opacity
+- Inset box-shadow vignette on the root div
 
-Return ONLY the JSON object, no markdown fences, no explanation.`;
+Example structure:
+<style>
+.bg-root { width:1024px; height:716px; overflow:hidden; position:relative; background:#0f172a; box-shadow:inset 0 0 120px rgba(0,0,0,0.6); }
+.bg-glow { position:absolute; width:800px; height:800px; border-radius:50%; background:radial-gradient(circle,rgba(99,102,241,0.07),transparent 65%); top:-200px; right:-200px; }
+/* more rules... */
+</style>
+<div class="bg-root">
+  <div class="bg-glow"></div>
+  <!-- more layers -->
+</div>`;
 
     const msg = await client.messages.create({
       model: "claude-sonnet-4-6",
@@ -160,30 +163,17 @@ Return ONLY the JSON object, no markdown fences, no explanation.`;
     const text =
       msg.content[0].type === "text" ? msg.content[0].text : "";
 
-    // Parse JSON response { css, html }
-    let css = "";
-    let html = "";
-    try {
-      const jsonStr = text.replace(/```json?\n?/g, "").replace(/```/g, "").trim();
-      const start = jsonStr.indexOf("{");
-      const end = jsonStr.lastIndexOf("}");
-      const parsed = JSON.parse(jsonStr.slice(start, end + 1));
-      css = parsed.css ?? "";
-      html = parsed.html ?? "";
-    } catch {
-      // Fallback: try to extract a raw div if the model ignored the JSON format
-      const divMatch = text.match(/<div[\s\S]*<\/div>/);
-      if (!divMatch) {
-        return Response.json(
-          { error: "No HTML found in response", raw: text.slice(0, 500) },
-          { status: 500 },
-        );
-      }
-      html = divMatch[0];
+    // Strip markdown fences if present, then extract <style>...<div>...</div>
+    const stripped = text.replace(/```html?\n?/g, "").replace(/```\n?/g, "").trim();
+    const htmlMatch = stripped.match(/(<style>[\s\S]*?<\/style>\s*)?(<div[\s\S]*<\/div>)/);
+    if (!htmlMatch) {
+      return Response.json(
+        { error: "No HTML found in response", raw: text.slice(0, 500) },
+        { status: 500 },
+      );
     }
 
-    // Combine into a single HTML string: <style> + markup
-    const combined = css ? `<style>${css}</style>${html}` : html;
+    const combined = (htmlMatch[1] ?? "") + htmlMatch[2];
 
     return Response.json({
       html: combined,
