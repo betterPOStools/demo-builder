@@ -17,7 +17,7 @@ export function ConnectionForm({ onSaved, onCancel }: Props) {
   const [port, setPort] = useState("3306");
   const [database, setDatabase] = useState("pecandemodb");
   const [username, setUsername] = useState("root");
-  const [password, setPassword] = useState("");
+  const [password, setPassword] = useState("123456");
   const [uploadUrl, setUploadUrl] = useState("");
   const [saving, setSaving] = useState(false);
 
