@@ -9,7 +9,7 @@ export async function POST(request: Request) {
         restaurantName?: string;
         restaurantType?: string;
         groups?: string[];
-        type: "sidebar" | "background" | "palette";
+        type: "sidebar" | "background" | "palette" | "unified";
         styleHints?: string;
       };
 
@@ -67,6 +67,75 @@ Rules:
           input_tokens: msg.usage.input_tokens,
           output_tokens: msg.usage.output_tokens,
         },
+      });
+    }
+
+    // --- Unified: one seamless 1384×716 composition (sidebar + background joined) ---
+    if (type === "unified") {
+      const unifiedPrompt = `You are an expert CSS visual designer. Create a single seamless full-screen background for a restaurant POS terminal that spans both the sidebar strip and the main screen.
+
+${context}
+
+CANVAS: exactly 1384px wide × 716px tall. Will be rasterized to PNG by html2canvas, then split:
+- LEFT 360px  → sidebar image (360×696, portrait strip on the left of the POS screen)
+- RIGHT 1024px → main background (1024×716, sits behind POS menu buttons)
+
+OUTPUT: Return a <style> block followed immediately by a single root <div>. No JSON, no markdown — raw HTML only.
+
+CSS CONSTRAINTS (html2canvas):
+- No @import, no external url() — system fonts only
+- Gradients, box-shadow, border-radius, clip-path, transform, opacity all work
+- NO ::before / ::after — not reliably captured by html2canvas
+- Use child divs for all layers
+
+DESIGN — THE KEY GOAL IS A SEAMLESS SPLIT:
+- Root: <div class="u-root"> — width:1384px; height:716px; overflow:hidden; position:relative
+- Use a horizontal gradient or color wash as the base that flows naturally across the full 1384px width
+- The LEFT 360px can be richer and more saturated (it's decorative chrome)
+- The RIGHT 1024px MUST be very dark and subtle — POS buttons and item text sit on top of it. Max opacity 8–12% for any decorative element on the right side.
+- The seam at x=360 must be INVISIBLE — no hard edge, use gradients that cross it naturally
+- Cuisine-appropriate accent color tied to the restaurant type
+
+STRUCTURE APPROACH:
+1. A base gradient div spanning full 1384px width (the foundation)
+2. 2–3 large decorative shapes (circles, diagonal panels) centered in the LEFT zone
+3. 1–2 very-low-opacity echo shapes extending into the RIGHT zone (continuity)
+4. An inset vignette on the right side to keep it dark enough for the POS UI
+
+Example skeleton:
+<style>
+.u-root { width:1384px; height:716px; overflow:hidden; position:relative; background:linear-gradient(105deg,#1e1040 0%,#0f172a 26%,#0a0f1e 100%); }
+.u-base { position:absolute; inset:0; background:linear-gradient(90deg,rgba(99,102,241,0.12) 0%,rgba(99,102,241,0.02) 36%,transparent 60%); }
+.u-orb1 { position:absolute; width:480px; height:480px; border-radius:50%; background:radial-gradient(circle,rgba(139,92,246,0.22),transparent 65%); top:-80px; left:-60px; }
+.u-stripe { position:absolute; inset:0; background:repeating-linear-gradient(118deg,transparent,transparent 28px,rgba(255,255,255,0.015) 28px,rgba(255,255,255,0.015) 29px); }
+.u-vignette { position:absolute; left:360px; top:0; width:1024px; height:716px; box-shadow:inset 0 0 180px rgba(0,0,0,0.55); }
+</style>
+<div class="u-root">
+  <div class="u-base"></div>
+  <div class="u-orb1"></div>
+  <div class="u-stripe"></div>
+  <div class="u-vignette"></div>
+</div>
+
+Make it unique to the restaurant's cuisine and vibe. Be creative with the left sidebar area — that's the showcase. Keep the right area tastefully dark.`;
+
+      const msg = await client.messages.create({
+        model: "claude-sonnet-4-6",
+        max_tokens: 8192,
+        messages: [{ role: "user", content: unifiedPrompt }],
+      });
+
+      const text = msg.content[0].type === "text" ? msg.content[0].text : "";
+      const stripped = text.replace(/```html?\n?/g, "").replace(/```\n?/g, "").trim();
+      const htmlMatch = stripped.match(/(<style>[\s\S]*?<\/style>\s*)?(<div[\s\S]*<\/div>)/);
+      if (!htmlMatch) {
+        return Response.json({ error: "No HTML found in response", raw: text.slice(0, 500) }, { status: 500 });
+      }
+
+      return Response.json({
+        html: (htmlMatch[1] ?? "") + htmlMatch[2],
+        type: "unified",
+        usage: { input_tokens: msg.usage.input_tokens, output_tokens: msg.usage.output_tokens },
       });
     }
 

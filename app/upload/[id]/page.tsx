@@ -11,7 +11,10 @@ interface UploadedFile {
   status: "uploading" | "done" | "error";
 }
 
-function resizeImage(file: File, maxPx = 1800): Promise<Blob> {
+// Vercel serverless body limit is 4.5 MB. Target well below that.
+const MAX_UPLOAD_BYTES = 3.8 * 1024 * 1024;
+
+function resizeImage(file: File, maxPx = 1400): Promise<Blob> {
   return new Promise((resolve, reject) => {
     const img = new Image();
     const url = URL.createObjectURL(file);
@@ -24,11 +27,23 @@ function resizeImage(file: File, maxPx = 1800): Promise<Blob> {
       canvas.width = w;
       canvas.height = h;
       canvas.getContext("2d")!.drawImage(img, 0, 0, w, h);
-      canvas.toBlob(
-        (b) => (b ? resolve(b) : reject(new Error("Canvas error"))),
-        "image/jpeg",
-        0.82,
-      );
+
+      // Reduce quality until blob fits within Vercel's request body limit
+      function tryQuality(q: number) {
+        canvas.toBlob(
+          (b) => {
+            if (!b) { reject(new Error("Canvas error")); return; }
+            if (b.size <= MAX_UPLOAD_BYTES || q <= 0.4) {
+              resolve(b);
+            } else {
+              tryQuality(Math.max(0.4, q - 0.08));
+            }
+          },
+          "image/jpeg",
+          q,
+        );
+      }
+      tryQuality(0.82);
     };
     img.onerror = reject;
     img.src = url;

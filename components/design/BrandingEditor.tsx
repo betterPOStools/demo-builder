@@ -24,6 +24,7 @@ import {
 import { useStore } from "@/store";
 import { isLightColor, generateId } from "@/lib/utils";
 import { htmlToPng } from "@/lib/htmlToPng";
+import { splitBrandingImage, splitUploadedImage, COMBINED_W, COMBINED_H } from "@/lib/splitBrandingImage";
 
 function ColorField({
   label,
@@ -179,6 +180,52 @@ export function BrandingEditor() {
     }
   }
 
+  async function generateSeamless() {
+    setGenerating(true);
+    setGenProgress("Generating seamless background...");
+    try {
+      const res = await fetch("/api/generate-branding", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...payload, type: "unified" }),
+      });
+      if (!res.ok) throw new Error("Generation failed");
+      const d = await res.json();
+      const fullPng = await htmlToPng(d.html, COMBINED_W, COMBINED_H);
+      const { sidebarPng, backgroundPng } = await splitBrandingImage(fullPng);
+
+      const ts = new Date().toISOString();
+      addGeneratedImage({ id: generateId(), type: "sidebar", dataUri: sidebarPng, createdAt: ts, restaurantName: restaurantName || undefined });
+      addGeneratedImage({ id: generateId(), type: "background", dataUri: backgroundPng, createdAt: ts, restaurantName: restaurantName || undefined });
+      setPreview((prev) => ({ ...prev, sidebarPng, backgroundPng }));
+    } catch (err) {
+      console.error("Seamless generation failed:", err);
+    } finally {
+      setGenerating(false);
+      setGenProgress("");
+    }
+  }
+
+  async function handleImageUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setGenerating(true);
+    setGenProgress("Processing image...");
+    try {
+      const { sidebarPng, backgroundPng } = await splitUploadedImage(file);
+      const ts = new Date().toISOString();
+      addGeneratedImage({ id: generateId(), type: "sidebar", dataUri: sidebarPng, createdAt: ts, restaurantName: restaurantName || undefined });
+      addGeneratedImage({ id: generateId(), type: "background", dataUri: backgroundPng, createdAt: ts, restaurantName: restaurantName || undefined });
+      setPreview((prev) => ({ ...prev, sidebarPng, backgroundPng }));
+    } catch (err) {
+      console.error("Image split failed:", err);
+    } finally {
+      setGenerating(false);
+      setGenProgress("");
+    }
+  }
+
   function acceptAll() {
     if (!preview) return;
     const patch: Record<string, string | null> = {};
@@ -260,6 +307,27 @@ export function BrandingEditor() {
             </Button>
             <p className="text-[10px] text-slate-600">
               Generates color palette + sidebar image + background image
+            </p>
+
+            <div className="flex gap-2">
+              <Button
+                variant="outline"
+                onClick={generateSeamless}
+                disabled={generating}
+                className="flex-1 gap-1.5 text-xs"
+                size="sm"
+              >
+                <Sparkles className="h-3.5 w-3.5 text-amber-400" />
+                Generate Seamless
+              </Button>
+              <label className={`flex flex-1 cursor-pointer items-center justify-center gap-1.5 rounded-md border border-slate-600 bg-transparent px-2 py-1 text-xs font-medium text-slate-300 transition hover:border-slate-400 hover:text-white ${generating ? "pointer-events-none opacity-40" : ""}`}>
+                <Wand2 className="h-3.5 w-3.5" />
+                Upload &amp; Split
+                <input type="file" accept="image/*" className="hidden" onChange={handleImageUpload} disabled={generating} />
+              </label>
+            </div>
+            <p className="text-[10px] text-slate-600">
+              Seamless: one image split across sidebar + background. Upload: use your own photo.
             </p>
           </div>
 
