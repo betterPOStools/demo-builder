@@ -7,8 +7,9 @@ import { createDeploySlice, type DeploySlice } from "./deploySlice";
 export interface SessionSlice {
   currentStep: number;
   setCurrentStep: (step: number) => void;
-  sessionHydrated: boolean;
-  hydrateFromSession: (data: Record<string, unknown>) => void;
+  hydratedSessionId: string | null;
+  hydrateFromSession: (sessionId: string, data: Record<string, unknown>) => void;
+  resetForNewProject: () => void;
 }
 
 export type StoreState = ExtractionSlice &
@@ -26,9 +27,49 @@ export const useStore = create<StoreState>()((...a) => ({
   // Session
   currentStep: 1,
   setCurrentStep: (step) => a[0]({ currentStep: step }),
-  sessionHydrated: false,
-  hydrateFromSession: (data) => {
-    const patch: Record<string, unknown> = { sessionHydrated: true };
+  hydratedSessionId: null,
+
+  resetForNewProject: () => {
+    const [set] = a;
+    set({
+      // Session
+      hydratedSessionId: null,
+      currentStep: 1,
+      // Extraction
+      extractedRows: [],
+      extractedModifiers: [],
+      extractedGraphics: [],
+      restaurantName: "",
+      restaurantType: null,
+      files: [],
+      isProcessing: false,
+      // Design
+      groups: [],
+      items: [],
+      rooms: [],
+      branding: {
+        background: null,
+        background_picture: null,
+        buttons_background_color: null,
+        buttons_font_color: null,
+        sidebar_picture: null,
+      },
+      imageLibrary: [],
+      designOrigin: { type: "fresh" },
+      isDirty: false,
+      // Modifiers
+      modifierTemplates: [],
+      // Deploy
+      deployStatus: "idle",
+      deployResult: null,
+      generatedSql: null,
+      deployStats: null,
+      pendingImages: [],
+    } as Partial<StoreState>);
+  },
+
+  hydrateFromSession: (sessionId, data) => {
+    const patch: Record<string, unknown> = { hydratedSessionId: sessionId };
 
     // Extraction data
     if (data.extracted_rows) patch.extractedRows = data.extracted_rows;
@@ -43,6 +84,7 @@ export const useStore = create<StoreState>()((...a) => ({
       if (ds.items) patch.items = ds.items;
       if (ds.rooms) patch.rooms = ds.rooms;
       if (ds.branding) patch.branding = ds.branding;
+      if (ds.imageLibrary) patch.imageLibrary = ds.imageLibrary;
       if (ds.designOrigin) patch.designOrigin = ds.designOrigin;
     }
 

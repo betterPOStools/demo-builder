@@ -23,6 +23,7 @@ Environment variables (in .env):
     POLL_INTERVAL       — Seconds between polls (default: 5)
 """
 
+import base64
 import json
 import os
 import subprocess
@@ -63,6 +64,8 @@ SSH_HOST = os.environ.get("SSH_HOST", "")  # defaults to DB_HOST
 SSH_USER = os.environ.get("SSH_USER", "admin")
 POS_IMAGES_DIR = os.environ.get("POS_IMAGES_DIR", r"C:\Program Files\Pecan Solutions\Pecan POS\images")
 POS_EXE = os.environ.get("POS_EXE", r"C:\Program Files\Pecan Solutions\Pecan POS\Pecan POS.exe")
+POS_DIR = os.environ.get("POS_DIR", r"C:\Program Files\Pecan Solutions\Pecan POS")
+PSEXEC_PATH = os.environ.get("PSEXEC_PATH", r"C:\tools\PsExec64.exe")
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "5"))
 
 HEADERS = {
@@ -147,8 +150,11 @@ def execute_sql(sql, deploy_target=None):
         cursor.execute("SET FOREIGN_KEY_CHECKS=0")
 
         for stmt in sql.split(";"):
-            stmt = stmt.strip()
-            if not stmt or stmt.startswith("--"):
+            # Strip leading comment lines (-- ...) to get to the actual SQL
+            lines = stmt.strip().splitlines()
+            sql_lines = [l for l in lines if not l.strip().startswith("--")]
+            stmt = "\n".join(sql_lines).strip()
+            if not stmt:
                 continue
             try:
                 cursor.execute(stmt)
@@ -184,16 +190,29 @@ def push_images_scp(pending_images, host, user=None):
             if not image_url or not dest_path:
                 continue
 
-            # Download image to temp file
-            r = requests.get(image_url, timeout=30)
-            r.raise_for_status()
+            # Get image bytes — either decode data URI or download from URL
+            if image_url.startswith("data:"):
+                # data:image/png;base64,iVBOR...
+                _, b64_data = image_url.split(",", 1)
+                raw_bytes = base64.b64decode(b64_data)
+            else:
+                r = requests.get(image_url, timeout=30)
+                r.raise_for_status()
+                raw_bytes = r.content
 
             with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(dest_path)[1]) as tmp:
-                tmp.write(r.content)
+                tmp.write(raw_bytes)
                 tmp_path = tmp.name
 
             # Determine remote path — put in images root or a subfolder
             remote_path = f"{POS_IMAGES_DIR}\\{dest_path}"
+
+            # Ensure subdirectory exists on POS (e.g., Background\, Sidebar\)
+            if "\\" in dest_path or "/" in dest_path:
+                subdir = os.path.dirname(dest_path).replace("/", "\\")
+                remote_dir = f"{POS_IMAGES_DIR}\\{subdir}"
+                ssh_cmd(host, f'if not exist "{remote_dir}" mkdir "{remote_dir}"', user=user, timeout=5)
+
             scp_dest = f"{user}@{host}:\"{remote_path}\""
 
             result = subprocess.run(
@@ -227,10 +246,50 @@ def pos_is_running(host, user=None):
     return ok and "Pecan POS.exe" in out
 
 
+def ensure_restart_script(host, user=None):
+    """Ensure the POS restart VBS script exists on the remote host.
+
+    Uses a VBS wrapper to launch POS via cmd with window style 0 (hidden),
+    so no black cmd.exe window appears on screen.
+    """
+    check = 'if exist C:\\restart_pos.vbs echo EXISTS'
+    ok, out, _ = ssh_cmd(host, check, user=user, timeout=5)
+    if ok and "EXISTS" in out:
+        return True
+    # Create via SCP from a temp file
+    import tempfile as _tf
+    vbs = (
+        'Set WshShell = CreateObject("WScript.Shell")\n'
+        'WshShell.Run "cmd /c cd /d ""C:\\Program Files\\Pecan Solutions\\Pecan POS"""'
+        ' && ""Pecan POS.exe"" --no-sandbox", 0, False\n'
+    )
+    with _tf.NamedTemporaryFile(mode="w", suffix=".vbs", delete=False) as f:
+        f.write(vbs)
+        tmp = f.name
+    try:
+        result = subprocess.run(
+            ["scp", "-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=no",
+             tmp, f"{user}@{host}:C:/restart_pos.vbs"],
+            capture_output=True, text=True, timeout=10,
+        )
+        return result.returncode == 0
+    except Exception as e:
+        print(f"  [POS] Failed to create restart script: {e}")
+        return False
+    finally:
+        os.unlink(tmp)
+
+
 def restart_pos(host, user=None, db_name=None):
-    """Restart the POS via SSH: taskkill → schtasks relaunch. Returns result dict."""
+    """Restart the POS via SSH: taskkill → PsExec relaunch. Returns result dict.
+
+    Uses PsExec64.exe -i 1 -h to launch the Electron app in the interactive
+    desktop session with elevation. The --no-sandbox flag allows the GPU
+    process to access the display adapter when launched remotely.
+    A VBS wrapper hides the cmd.exe window so only the POS GUI shows.
+    """
     user = user or SSH_USER
-    result = {"method": "ssh", "pos_restarted": False, "pos_running": False}
+    result = {"method": "psexec", "pos_restarted": False, "pos_running": False}
 
     if not ssh_available(host, user):
         result["error"] = "SSH not available"
@@ -241,51 +300,52 @@ def restart_pos(host, user=None, db_name=None):
     if db_name:
         appsettings = r"C:\Program Files\Pecan Solutions\Pecan POS\resources\api\appsettings.json"
         ps_cmd = (
-            f"powershell -Command \"(Get-Content '{appsettings}') "
-            f"-replace 'Database=[^;\\\"]+', 'Database={db_name}' "
-            f"| Set-Content '{appsettings}'\""
+            f'powershell.exe -NoProfile -Command "'
+            f"(Get-Content '{appsettings}') "
+            f"-replace 'Database=[^;]+?(?=[;\\\"])', 'Database={db_name}' "
+            f"| Set-Content '{appsettings}'"
+            f'"'
         )
         ok, _, err = ssh_cmd(host, ps_cmd, user=user, timeout=15)
         if ok:
             print(f"  [POS] Updated appsettings.json → Database={db_name}")
             result["db_switched"] = db_name
         else:
-            print(f"  [POS] Failed to update appsettings: {err}")
+            print(f"  [POS] appsettings update skipped: {err[:80]}")
 
-    # Kill POS
+    # Kill POS (ignore "not found" — it may not be running)
     ok, out, err = ssh_cmd(host, 'taskkill /f /im "Pecan POS.exe"', user=user)
     if ok:
         print(f"  [POS] Killed POS process")
+    elif "not found" in (err + out).lower():
+        print(f"  [POS] POS was not running")
     else:
         print(f"  [POS] taskkill: {err or out}")
 
     time.sleep(2)
 
-    # Create and run restart task
-    ok, _, err = ssh_cmd(
-        host,
-        f'schtasks /create /tn "PecanPOSRestart" /tr "{POS_EXE}" /sc once /st 00:00 /f',
-        user=user, timeout=10,
-    )
-    if not ok:
-        result["error"] = f"schtasks create failed: {err}"
-        print(f"  [POS] schtasks create failed: {err}")
-        return result
+    # Ensure VBS launcher exists (hidden cmd window)
+    ensure_restart_script(host, user)
 
-    ok, _, err = ssh_cmd(host, 'schtasks /run /tn "PecanPOSRestart"', user=user)
-    if ok:
-        print(f"  [POS] Launched POS via scheduled task")
+    # Launch via PsExec into interactive session 1, elevated
+    # VBS wrapper hides the cmd window; --no-sandbox allows GPU from remote session
+    launch_cmd = f'{PSEXEC_PATH} -accepteula -i 1 -h -d wscript.exe C:\\restart_pos.vbs'
+    ok, out, err = ssh_cmd(host, launch_cmd, user=user, timeout=15)
+    # PsExec writes to stderr even on success; check for "started on"
+    combined = (out + " " + err).lower()
+    if "started on" in combined:
+        print(f"  [POS] Launched POS via PsExec (session 1, elevated, --no-sandbox)")
         result["pos_restarted"] = True
     else:
-        result["error"] = f"schtasks run failed: {err}"
-        print(f"  [POS] schtasks run failed: {err}")
+        result["error"] = f"PsExec launch failed: {err[:200]}"
+        print(f"  [POS] PsExec launch failed: {err[:200]}")
         return result
 
     # Wait and verify
-    time.sleep(4)
+    time.sleep(8)
     result["pos_running"] = pos_is_running(host, user)
     if result["pos_running"]:
-        print(f"  [POS] Verified running")
+        print(f"  [POS] Verified running in console session")
     else:
         print(f"  [POS] Warning: process not detected after restart")
 

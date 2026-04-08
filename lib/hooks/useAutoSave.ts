@@ -9,10 +9,18 @@ export function useAutoSave(projectId: string) {
   const justHydratedRef = useRef(true);
 
   useEffect(() => {
+    // Reset the skip flag when project changes
+    justHydratedRef.current = true;
+
     const unsub = useStore.subscribe((state, prev) => {
-      // Skip auto-save right after hydration
+      // Skip auto-save right after hydration / project switch
       if (justHydratedRef.current) {
         justHydratedRef.current = false;
+        return;
+      }
+
+      // Don't save during a reset (hydratedSessionId changing)
+      if (state.hydratedSessionId !== prev.hydratedSessionId) {
         return;
       }
 
@@ -26,7 +34,8 @@ export function useAutoSave(projectId: string) {
         state.extractedModifiers === prev.extractedModifiers &&
         state.restaurantName === prev.restaurantName &&
         state.currentStep === prev.currentStep &&
-        state.branding === prev.branding
+        state.branding === prev.branding &&
+        state.imageLibrary === prev.imageLibrary
       ) {
         return;
       }
@@ -52,6 +61,7 @@ export function useAutoSave(projectId: string) {
                   items: s.items,
                   rooms: s.rooms,
                   branding: s.branding,
+                  imageLibrary: s.imageLibrary,
                   designOrigin: s.designOrigin,
                 }
               : null,

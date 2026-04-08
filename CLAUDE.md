@@ -15,7 +15,7 @@ Unified POS pipeline app: Extract menus → Design templates → Deploy to Maria
 ## Dev Commands
 
 ```bash
-npm run dev          # Start dev server on port 3001
+npm run dev          # Start dev server on port 3002
 npm run build        # Production build
 npm run lint         # ESLint
 ```
@@ -32,7 +32,7 @@ npm run lint         # ESLint
 
 | Port | Service |
 |------|---------|
-| 3001 | Next.js dev server |
+| 3002 | Next.js dev server |
 
 ## Pipeline
 

@@ -13,7 +13,7 @@ interface Props {
 
 export function ConnectionForm({ onSaved, onCancel }: Props) {
   const [name, setName] = useState("");
-  const [host, setHost] = useState("192.168.40.141");
+  const [host, setHost] = useState("100.112.68.19");
   const [port, setPort] = useState("3306");
   const [database, setDatabase] = useState("pecandemodb");
   const [username, setUsername] = useState("root");
@@ -117,7 +117,7 @@ export function ConnectionForm({ onSaved, onCancel }: Props) {
             id="conn-upload"
             value={uploadUrl}
             onChange={(e) => setUploadUrl(e.target.value)}
-            placeholder="http://192.168.40.141:8081"
+            placeholder="http://100.112.68.19:8081"
           />
         </div>
       </div>

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { GripVertical, Trash2, Wine } from "lucide-react";
+import { GripVertical, Pencil, Trash2, Wine } from "lucide-react";
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { useStore } from "@/store";
@@ -212,6 +212,15 @@ export function ItemCard({ item }: { item: ItemNode }) {
         {item.defaultPrice > 0 ? `$${item.defaultPrice.toFixed(2)}` : ""}
       </span>
 
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          openEdit();
+        }}
+        className="hidden rounded p-0.5 text-slate-600 hover:text-blue-400 group-hover:block"
+      >
+        <Pencil className="h-3 w-3" />
+      </button>
       <button
         onClick={(e) => {
           e.stopPropagation();

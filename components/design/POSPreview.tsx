@@ -56,7 +56,14 @@ function MainScreen({
   return (
     <div
       className="relative flex h-full items-center justify-center overflow-hidden"
-      style={{ backgroundColor: bg }}
+      style={{
+        backgroundColor: bg,
+        backgroundImage: branding.background_picture
+          ? `url(${branding.background_picture})`
+          : undefined,
+        backgroundSize: "cover",
+        backgroundPosition: "center",
+      }}
     >
       {/* Sidebar */}
       {branding.sidebar_picture && (

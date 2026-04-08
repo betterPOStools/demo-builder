@@ -28,7 +28,7 @@
   --radius-xl: calc(var(--radius) + 4px);
 }
 
-.dark {
+:root {
   --background: #0f1117;
   --foreground: #e2e8f0;
   --card: #1e293b;

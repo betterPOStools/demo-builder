@@ -14,28 +14,36 @@ export default function ProjectLayout({
 }) {
   const { id } = use(params);
   const [loading, setLoading] = useState(true);
-  const sessionHydrated = useStore((s) => s.sessionHydrated);
+  const hydratedSessionId = useStore((s) => s.hydratedSessionId);
   const hydrateFromSession = useStore((s) => s.hydrateFromSession);
+  const resetForNewProject = useStore((s) => s.resetForNewProject);
 
-  // Hydrate store from Supabase session on mount
+  // Hydrate store from Supabase session on mount, or reset when project ID changes
   useEffect(() => {
-    if (sessionHydrated) {
+    if (hydratedSessionId === id) {
       setLoading(false);
       return;
     }
+
+    // Different project — reset store first
+    resetForNewProject();
+    setLoading(true);
 
     fetch(`/api/sessions/${id}`)
       .then((r) => r.json())
       .then((data) => {
         if (data.session) {
-          hydrateFromSession(data.session);
+          hydrateFromSession(id, data.session);
+        } else {
+          // New project — just mark as hydrated with empty state
+          hydrateFromSession(id, {});
         }
       })
       .catch(() => {
-        // Session not found — fresh project
+        hydrateFromSession(id, {});
       })
       .finally(() => setLoading(false));
-  }, [id, sessionHydrated, hydrateFromSession]);
+  }, [id, hydratedSessionId, hydrateFromSession, resetForNewProject]);
 
   // Auto-save to Supabase
   useAutoSave(id);

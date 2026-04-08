@@ -14,9 +14,19 @@ import { generateId } from "@/lib/utils";
 
 export interface BrandingState {
   background: string | null;
+  background_picture: string | null;
   buttons_background_color: string | null;
   buttons_font_color: string | null;
   sidebar_picture: string | null;
+}
+
+export interface GeneratedImage {
+  id: string;
+  type: "sidebar" | "background" | "item";
+  dataUri: string; // PNG data URI
+  createdAt: string;
+  restaurantName?: string;
+  itemName?: string; // for type "item" — which menu item this was generated for
 }
 
 export interface DesignSlice {
@@ -25,6 +35,7 @@ export interface DesignSlice {
   items: ItemNode[];
   rooms: RoomNode[];
   branding: BrandingState;
+  imageLibrary: GeneratedImage[];
   designOrigin: DesignOrigin;
   isDirty: boolean;
 
@@ -69,12 +80,18 @@ export interface DesignSlice {
   // Branding
   updateBranding: (changes: Partial<BrandingState>) => void;
 
+  // Image library
+  addGeneratedImage: (image: GeneratedImage) => void;
+  deleteGeneratedImage: (imageId: string) => void;
+  clearImageLibrary: (type?: GeneratedImage["type"]) => void;
+
   // Clear
   clearDesign: () => void;
 }
 
 const DEFAULT_BRANDING: BrandingState = {
   background: null,
+  background_picture: null,
   buttons_background_color: null,
   buttons_font_color: null,
   sidebar_picture: null,
@@ -85,6 +102,7 @@ export const createDesignSlice: StateCreator<DesignSlice> = (set) => ({
   items: [],
   rooms: [],
   branding: { ...DEFAULT_BRANDING },
+  imageLibrary: [],
   designOrigin: { type: "fresh" },
   isDirty: false,
 
@@ -434,12 +452,33 @@ export const createDesignSlice: StateCreator<DesignSlice> = (set) => ({
       isDirty: true,
     })),
 
+  addGeneratedImage: (image) =>
+    set((state) => ({
+      imageLibrary: [image, ...state.imageLibrary],
+      isDirty: true,
+    })),
+
+  deleteGeneratedImage: (imageId) =>
+    set((state) => ({
+      imageLibrary: state.imageLibrary.filter((i) => i.id !== imageId),
+      isDirty: true,
+    })),
+
+  clearImageLibrary: (type) =>
+    set((state) => ({
+      imageLibrary: type
+        ? state.imageLibrary.filter((i) => i.type !== type)
+        : [],
+      isDirty: true,
+    })),
+
   clearDesign: () =>
     set({
       groups: [],
       items: [],
       rooms: [],
       branding: { ...DEFAULT_BRANDING },
+      imageLibrary: [],
       designOrigin: { type: "fresh" },
       isDirty: false,
     }),

@@ -1,8 +1,19 @@
 "use client";
 
-import { Palette } from "lucide-react";
+import { useState } from "react";
+import {
+  Palette,
+  Sparkles,
+  Loader2,
+  Check,
+  X,
+  Trash2,
+  Library,
+  Wand2,
+} from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Button } from "@/components/ui/button";
 import {
   Card,
   CardContent,
@@ -10,7 +21,8 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { useStore } from "@/store";
-import { isLightColor } from "@/lib/utils";
+import { isLightColor, generateId } from "@/lib/utils";
+import { htmlToPng } from "@/lib/htmlToPng";
 
 function ColorField({
   label,
@@ -58,13 +70,154 @@ const PREVIEW_SERVICES = [
   { label: "Delivery", fallback: "#7c3aed" },
 ];
 
+interface BrandingPreview {
+  palette?: {
+    background: string;
+    buttons_background_color: string;
+    buttons_font_color: string;
+  };
+  sidebarPng?: string;
+  backgroundPng?: string;
+}
+
 export function BrandingEditor() {
   const branding = useStore((s) => s.branding);
   const updateBranding = useStore((s) => s.updateBranding);
+  const restaurantName = useStore((s) => s.restaurantName);
+  const restaurantType = useStore((s) => s.restaurantType);
+  const groups = useStore((s) => s.groups);
+  const imageLibrary = useStore((s) => s.imageLibrary);
+  const addGeneratedImage = useStore((s) => s.addGeneratedImage);
+  const deleteGeneratedImage = useStore((s) => s.deleteGeneratedImage);
+
+  const [styleHints, setStyleHints] = useState("");
+  const [generating, setGenerating] = useState(false);
+  const [genProgress, setGenProgress] = useState("");
+  const [preview, setPreview] = useState<BrandingPreview | null>(null);
+  const [showLibrary, setShowLibrary] = useState(false);
 
   const bg = branding.background || "#0f172a";
   const btnBg = branding.buttons_background_color;
   const btnFg = branding.buttons_font_color || "#ffffff";
+
+  const payload = {
+    restaurantName,
+    restaurantType,
+    groups: groups.map((g) => g.name),
+    styleHints: styleHints.trim() || undefined,
+  };
+
+  async function generateAll() {
+    setGenerating(true);
+    setGenProgress("Generating palette...");
+    const result: BrandingPreview = {};
+
+    try {
+      // 1. Palette (fast)
+      const paletteRes = await fetch("/api/generate-branding", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...payload, type: "palette" }),
+      });
+      if (paletteRes.ok) {
+        const data = await paletteRes.json();
+        if (data.palette) result.palette = data.palette;
+      }
+
+      // 2. Images in parallel
+      setGenProgress("Generating images...");
+      const [sidebarRes, bgRes] = await Promise.allSettled([
+        fetch("/api/generate-branding", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ...payload, type: "sidebar" }),
+        }).then(async (r) => {
+          if (!r.ok) throw new Error("sidebar failed");
+          const d = await r.json();
+          const png = await htmlToPng(d.html, 70, 600);
+          addGeneratedImage({
+            id: generateId(),
+            type: "sidebar",
+            dataUri: png,
+            createdAt: new Date().toISOString(),
+            restaurantName: restaurantName || undefined,
+          });
+          return png;
+        }),
+        fetch("/api/generate-branding", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ...payload, type: "background" }),
+        }).then(async (r) => {
+          if (!r.ok) throw new Error("background failed");
+          const d = await r.json();
+          const png = await htmlToPng(d.html, 800, 600);
+          addGeneratedImage({
+            id: generateId(),
+            type: "background",
+            dataUri: png,
+            createdAt: new Date().toISOString(),
+            restaurantName: restaurantName || undefined,
+          });
+          return png;
+        }),
+      ]);
+
+      if (sidebarRes.status === "fulfilled") result.sidebarPng = sidebarRes.value;
+      if (bgRes.status === "fulfilled") result.backgroundPng = bgRes.value;
+
+      setPreview(result);
+      setGenProgress("");
+    } catch (err) {
+      console.error("Branding generation failed:", err);
+      setGenProgress("");
+    } finally {
+      setGenerating(false);
+    }
+  }
+
+  function acceptAll() {
+    if (!preview) return;
+    const patch: Record<string, string | null> = {};
+    if (preview.palette) {
+      patch.background = preview.palette.background;
+      patch.buttons_background_color = preview.palette.buttons_background_color;
+      patch.buttons_font_color = preview.palette.buttons_font_color;
+    }
+    if (preview.sidebarPng) patch.sidebar_picture = preview.sidebarPng;
+    if (preview.backgroundPng) patch.background_picture = preview.backgroundPng;
+    updateBranding(patch);
+    setPreview(null);
+  }
+
+  function acceptPartial(key: "palette" | "sidebar" | "background") {
+    if (!preview) return;
+    if (key === "palette" && preview.palette) {
+      updateBranding({
+        background: preview.palette.background,
+        buttons_background_color: preview.palette.buttons_background_color,
+        buttons_font_color: preview.palette.buttons_font_color,
+      });
+    }
+    if (key === "sidebar" && preview.sidebarPng) {
+      updateBranding({ sidebar_picture: preview.sidebarPng });
+    }
+    if (key === "background" && preview.backgroundPng) {
+      updateBranding({ background_picture: preview.backgroundPng });
+    }
+  }
+
+  function useLibraryImage(dataUri: string, type: "sidebar" | "background") {
+    if (type === "sidebar") {
+      updateBranding({ sidebar_picture: dataUri });
+    } else {
+      updateBranding({ background_picture: dataUri });
+    }
+    setShowLibrary(false);
+  }
+
+  const sidebarImages = imageLibrary.filter((i) => i.type === "sidebar");
+  const backgroundImages = imageLibrary.filter((i) => i.type === "background");
 
   return (
     <div className="space-y-4">
@@ -76,6 +229,142 @@ export function BrandingEditor() {
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
+          {/* AI Generate Section */}
+          <div className="rounded-lg border border-slate-700 bg-slate-800/50 p-3 space-y-2.5">
+            <Label className="text-xs text-slate-400">AI Branding Generator</Label>
+            <Input
+              value={styleHints}
+              onChange={(e) => setStyleHints(e.target.value)}
+              placeholder="Style hints: rustic, modern, neon, tropical, elegant, red & gold..."
+              className="h-8 text-xs"
+            />
+            <Button
+              onClick={generateAll}
+              disabled={generating}
+              className="w-full gap-2"
+            >
+              {generating ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  {genProgress || "Generating..."}
+                </>
+              ) : (
+                <>
+                  <Wand2 className="h-4 w-4" />
+                  Generate Branding
+                </>
+              )}
+            </Button>
+            <p className="text-[10px] text-slate-600">
+              Generates color palette + sidebar image + background image
+            </p>
+          </div>
+
+          {/* Preview of generated branding */}
+          {preview && (
+            <div className="space-y-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3">
+              <div className="flex items-center justify-between">
+                <Label className="text-xs text-amber-400">Generated Branding — Review</Label>
+                <div className="flex gap-1.5">
+                  <Button
+                    size="sm"
+                    onClick={acceptAll}
+                    className="h-6 gap-1 bg-green-600 px-2 text-[10px] hover:bg-green-500"
+                  >
+                    <Check className="h-3 w-3" /> Apply All
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={generateAll}
+                    disabled={generating}
+                    className="h-6 px-2 text-[10px]"
+                  >
+                    {generating ? <Loader2 className="h-3 w-3 animate-spin" /> : "Regenerate"}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => setPreview(null)}
+                    className="h-6 px-1.5 text-[10px] text-slate-500"
+                  >
+                    <X className="h-3 w-3" />
+                  </Button>
+                </div>
+              </div>
+
+              {/* Palette preview */}
+              {preview.palette && (
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between">
+                    <Label className="text-[10px] text-slate-400">Color Palette</Label>
+                    <button
+                      onClick={() => acceptPartial("palette")}
+                      className="text-[10px] text-green-400 hover:text-green-300"
+                    >
+                      Apply colors
+                    </button>
+                  </div>
+                  <div className="flex gap-2">
+                    {[
+                      { label: "BG", color: preview.palette.background },
+                      { label: "Buttons", color: preview.palette.buttons_background_color },
+                      { label: "Font", color: preview.palette.buttons_font_color },
+                    ].map((c) => (
+                      <div key={c.label} className="flex items-center gap-1.5">
+                        <div
+                          className="h-6 w-6 rounded border border-slate-600"
+                          style={{ backgroundColor: c.color }}
+                        />
+                        <div className="text-[10px]">
+                          <div className="text-slate-400">{c.label}</div>
+                          <div className="font-mono text-slate-500">{c.color}</div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Image previews */}
+              <div className="flex gap-3">
+                {preview.sidebarPng && (
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between">
+                      <Label className="text-[10px] text-slate-400">Sidebar</Label>
+                      <button
+                        onClick={() => acceptPartial("sidebar")}
+                        className="text-[10px] text-green-400 hover:text-green-300"
+                      >
+                        Apply
+                      </button>
+                    </div>
+                    <div className="rounded bg-slate-900 p-1">
+                      <img src={preview.sidebarPng} alt="" className="h-32 rounded border border-slate-700" />
+                    </div>
+                  </div>
+                )}
+                {preview.backgroundPng && (
+                  <div className="flex-1 space-y-1">
+                    <div className="flex items-center justify-between">
+                      <Label className="text-[10px] text-slate-400">Background</Label>
+                      <button
+                        onClick={() => acceptPartial("background")}
+                        className="text-[10px] text-green-400 hover:text-green-300"
+                      >
+                        Apply
+                      </button>
+                    </div>
+                    <div className="rounded bg-slate-900 p-1">
+                      <img src={preview.backgroundPng} alt="" className="max-h-32 w-full rounded border border-slate-700 object-cover" />
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Manual Color Controls */}
           <div className="grid gap-4 sm:grid-cols-2">
             <ColorField
               label="Background Color"
@@ -85,9 +374,7 @@ export function BrandingEditor() {
             <ColorField
               label="Buttons Background"
               value={branding.buttons_background_color}
-              onChange={(v) =>
-                updateBranding({ buttons_background_color: v })
-              }
+              onChange={(v) => updateBranding({ buttons_background_color: v })}
             />
             <ColorField
               label="Buttons Font Color"
@@ -96,53 +383,141 @@ export function BrandingEditor() {
             />
           </div>
 
-          <div className="space-y-1">
-            <Label className="text-xs">Sidebar Picture URL</Label>
-            <Input
-              value={branding.sidebar_picture || ""}
-              onChange={(e) =>
-                updateBranding({
-                  sidebar_picture: e.target.value || null,
-                })
-              }
-              placeholder="https://example.com/sidebar.png"
-              className="h-8 text-xs"
-            />
+          {/* Current Images */}
+          <div className="grid gap-3 sm:grid-cols-2">
+            {/* Sidebar */}
+            <div className="space-y-1">
+              <Label className="text-xs">Sidebar Picture</Label>
+              {branding.sidebar_picture ? (
+                <div className="flex items-center gap-2">
+                  <div className="h-12 w-6 overflow-hidden rounded border border-slate-700">
+                    <img src={branding.sidebar_picture} alt="" className="h-full w-full object-cover" />
+                  </div>
+                  <span className="flex-1 truncate text-[10px] text-slate-500">
+                    {branding.sidebar_picture.startsWith("data:") ? "Generated" : "URL"}
+                  </span>
+                  <button onClick={() => updateBranding({ sidebar_picture: null })} className="text-[10px] text-slate-500 hover:text-red-400">
+                    Clear
+                  </button>
+                </div>
+              ) : (
+                <p className="text-[10px] text-slate-600">None — use AI generator above</p>
+              )}
+            </div>
+
+            {/* Background image */}
+            <div className="space-y-1">
+              <Label className="text-xs">Background Image</Label>
+              {branding.background_picture ? (
+                <div className="flex items-center gap-2">
+                  <div className="h-8 w-14 overflow-hidden rounded border border-slate-700">
+                    <img src={branding.background_picture} alt="" className="h-full w-full object-cover" />
+                  </div>
+                  <span className="flex-1 truncate text-[10px] text-slate-500">
+                    {branding.background_picture.startsWith("data:") ? "Generated" : "URL"}
+                  </span>
+                  <button onClick={() => updateBranding({ background_picture: null })} className="text-[10px] text-slate-500 hover:text-red-400">
+                    Clear
+                  </button>
+                </div>
+              ) : (
+                <p className="text-[10px] text-slate-600">None — use AI generator above</p>
+              )}
+            </div>
           </div>
+
+          {/* Image Library */}
+          {imageLibrary.length > 0 && (
+            <div className="space-y-2">
+              <button
+                onClick={() => setShowLibrary(!showLibrary)}
+                className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-200"
+              >
+                <Library className="h-3.5 w-3.5" />
+                Image Library ({imageLibrary.length})
+              </button>
+
+              {showLibrary && (
+                <div className="space-y-3 rounded-lg border border-slate-700 bg-slate-800/50 p-3">
+                  {sidebarImages.length > 0 && (
+                    <div className="space-y-1.5">
+                      <Label className="text-[10px] text-slate-500">Sidebars ({sidebarImages.length})</Label>
+                      <div className="flex flex-wrap gap-2">
+                        {sidebarImages.map((img) => (
+                          <div key={img.id} className="group relative overflow-hidden rounded border border-slate-700 hover:border-blue-500/50">
+                            <img
+                              src={img.dataUri}
+                              alt=""
+                              className="h-20 w-auto cursor-pointer"
+                              onClick={() => useLibraryImage(img.dataUri, "sidebar")}
+                              title="Click to use"
+                            />
+                            <button
+                              onClick={() => deleteGeneratedImage(img.id)}
+                              className="absolute right-0.5 top-0.5 hidden rounded bg-black/70 p-0.5 text-red-400 hover:text-red-300 group-hover:block"
+                            >
+                              <Trash2 className="h-2.5 w-2.5" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {backgroundImages.length > 0 && (
+                    <div className="space-y-1.5">
+                      <Label className="text-[10px] text-slate-500">Backgrounds ({backgroundImages.length})</Label>
+                      <div className="flex flex-wrap gap-2">
+                        {backgroundImages.map((img) => (
+                          <div key={img.id} className="group relative overflow-hidden rounded border border-slate-700 hover:border-purple-500/50">
+                            <img
+                              src={img.dataUri}
+                              alt=""
+                              className="h-16 w-auto cursor-pointer"
+                              onClick={() => useLibraryImage(img.dataUri, "background")}
+                              title="Click to use"
+                            />
+                            <button
+                              onClick={() => deleteGeneratedImage(img.id)}
+                              className="absolute right-0.5 top-0.5 hidden rounded bg-black/70 p-0.5 text-red-400 hover:text-red-300 group-hover:block"
+                            >
+                              <Trash2 className="h-2.5 w-2.5" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Mini POS Preview */}
           <div className="space-y-2">
             <Label className="text-xs text-slate-500">Live Preview</Label>
             <div className="overflow-hidden rounded-lg ring-1 ring-slate-700">
-              {/* Title bar */}
               <div className="flex items-center gap-1.5 bg-gray-950 px-2.5 py-1">
                 <div className="h-2 w-2 rounded-full bg-red-500" />
                 <div className="h-2 w-2 rounded-full bg-yellow-500" />
                 <div className="h-2 w-2 rounded-full bg-green-500" />
-                <span className="ml-1.5 text-[9px] text-slate-600">
-                  POS Main Screen
-                </span>
+                <span className="ml-1.5 text-[9px] text-slate-600">POS Main Screen</span>
               </div>
-
-              {/* Main screen */}
               <div
                 className="relative flex h-48 items-center justify-center"
-                style={{ backgroundColor: bg }}
+                style={{
+                  backgroundColor: bg,
+                  backgroundImage: branding.background_picture ? `url(${branding.background_picture})` : undefined,
+                  backgroundSize: "cover",
+                  backgroundPosition: "center",
+                }}
               >
-                {/* Sidebar */}
                 {branding.sidebar_picture ? (
                   <div className="absolute left-0 top-0 h-full w-10 bg-[#0a0f1a]">
-                    <img
-                      src={branding.sidebar_picture}
-                      alt=""
-                      className="h-full w-full object-cover opacity-80"
-                    />
+                    <img src={branding.sidebar_picture} alt="" className="h-full w-full object-cover opacity-80" />
                   </div>
                 ) : (
                   <div className="absolute left-0 top-0 h-full w-10 bg-[#0a0f1a]/60" />
                 )}
-
-                {/* Service buttons */}
                 <div className="flex flex-wrap justify-center gap-2 pl-8">
                   {PREVIEW_SERVICES.map((s) => {
                     const bg = btnBg || s.fallback;
@@ -159,12 +534,8 @@ export function BrandingEditor() {
                   })}
                 </div>
               </div>
-
-              {/* Status bar */}
               <div className="flex items-center justify-between bg-gray-950 px-2.5 py-0.5">
-                <span className="text-[8px] text-slate-600">
-                  Branding Preview
-                </span>
+                <span className="text-[8px] text-slate-600">Branding Preview</span>
                 <span className="text-[8px] text-slate-600">
                   {btnBg ? `Buttons: ${btnBg}` : "Default colors"}
                 </span>

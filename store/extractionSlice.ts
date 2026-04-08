@@ -9,6 +9,7 @@ export interface FileQueueItem {
   size: number;
   status: "pending" | "processing" | "done" | "error";
   error?: string;
+  thumbnailUrl?: string;
 }
 
 export interface ExtractionSlice {
@@ -16,6 +17,7 @@ export interface ExtractionSlice {
   files: FileQueueItem[];
   addFiles: (files: File[]) => void;
   removeFile: (id: string) => void;
+  reorderFiles: (fileIds: string[]) => void;
   updateFileStatus: (id: string, status: FileQueueItem["status"], error?: string) => void;
   clearFiles: () => void;
 
@@ -47,28 +49,48 @@ export interface ExtractionSlice {
 export const createExtractionSlice: StateCreator<ExtractionSlice> = (set) => ({
   files: [],
   addFiles: (newFiles) =>
-    set((state) => ({
-      files: [
-        ...state.files,
-        ...newFiles.map((f) => ({
+    set((state) => {
+      // Sort new files alphanumerically by name (natural sort for page ordering)
+      const sorted = [...newFiles].sort((a, b) =>
+        a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }),
+      );
+      const newItems: FileQueueItem[] = sorted.map((f) => {
+        const isImage = f.type.startsWith("image/");
+        return {
           id: crypto.randomUUID(),
           file: f,
           name: f.name,
           type: f.type || f.name.split(".").pop() || "unknown",
           size: f.size,
           status: "pending" as const,
-        })),
-      ],
-    })),
+          thumbnailUrl: isImage ? URL.createObjectURL(f) : undefined,
+        };
+      });
+      return { files: [...state.files, ...newItems] };
+    }),
   removeFile: (id) =>
-    set((state) => ({ files: state.files.filter((f) => f.id !== id) })),
+    set((state) => {
+      const file = state.files.find((f) => f.id === id);
+      if (file?.thumbnailUrl) URL.revokeObjectURL(file.thumbnailUrl);
+      return { files: state.files.filter((f) => f.id !== id) };
+    }),
+  reorderFiles: (fileIds) =>
+    set((state) => {
+      const map = new Map(state.files.map((f) => [f.id, f]));
+      const reordered = fileIds.map((id) => map.get(id)).filter(Boolean) as FileQueueItem[];
+      return { files: reordered };
+    }),
   updateFileStatus: (id, status, error) =>
     set((state) => ({
       files: state.files.map((f) =>
         f.id === id ? { ...f, status, error } : f,
       ),
     })),
-  clearFiles: () => set({ files: [] }),
+  clearFiles: () =>
+    set((state) => {
+      state.files.forEach((f) => { if (f.thumbnailUrl) URL.revokeObjectURL(f.thumbnailUrl); });
+      return { files: [] };
+    }),
 
   isProcessing: false,
   setProcessing: (v) => set({ isProcessing: v }),

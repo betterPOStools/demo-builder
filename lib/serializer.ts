@@ -127,6 +127,7 @@ export function serializeDesignConfig(
   const resolvedBranding: DesignConfigBranding = branding ?? {
     background: null,
     background_url: null,
+    background_picture: null,
     buttons_background_color: null,
     buttons_font_color: null,
     sidebar_picture: null,

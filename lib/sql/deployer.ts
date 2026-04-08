@@ -19,10 +19,10 @@ function deriveDestPath(imageUrl: string, name: string): string {
 }
 
 export interface PendingImageTransfer {
-  type: "item" | "group";
+  type: "item" | "group" | "branding";
   name: string;
   entityId: string | undefined;
-  imageUrl: string;
+  imageUrl: string;  // HTTP URL or data: URI
   destPath: string;
 }
 
@@ -75,22 +75,47 @@ export function generateFullDeployment(opts: {
   const groupIds: Record<string, string> = {};
   const catIds: Record<string, string> = {};
   const itemIds: Record<string, string> = {};
-  const templateIds: Record<string, string> = {};
+  const pendingImageTransfers: PendingImageTransfer[] = [];
 
   // ---------------------------------------------------------------
-  // 0. Modifier Templates (must exist before items reference them)
+  // CLEANUP — Delete existing menu data before inserting new
+  // Order matters: children first, parents last (FK constraints)
   // ---------------------------------------------------------------
-  if (modifierTemplates.length > 0) {
-    statements.push("-- =============================================");
-    statements.push("-- MODIFIER TEMPLATES");
-    statements.push("-- =============================================");
+  statements.push("-- =============================================");
+  statements.push("-- CLEANUP EXISTING MENU DATA");
+  statements.push("-- (FK checks disabled by deploy agent)");
+  statements.push("-- =============================================");
+  statements.push("DELETE FROM `menuforcedmodifierlevelmodifiers`;");
+  statements.push("DELETE FROM `menuforcedmodifierlevels`;");
+  statements.push("DELETE FROM `menumodifiertemplateitemprefixes`;");
+  statements.push("DELETE FROM `menuitemprinters`;");
+  statements.push("DELETE FROM `menumodifiertemplateitems`;");
+  statements.push("DELETE FROM `menumodifiertemplatesections`;");
+  statements.push("DELETE FROM `menumodifiertemplates`;");
+  statements.push("DELETE FROM `menumodifiers`;");
+  statements.push("DELETE FROM `menuitems`;");
+  statements.push("DELETE FROM `menugroups`;");
+  statements.push("DELETE FROM `menucategories`;");
+  statements.push("DELETE FROM `rooms`;");
+  statements.push("DELETE FROM `tables`;");
 
-    for (const tmpl of modifierTemplates) {
-      const result = generateTemplateSql(tmpl.name, tmpl.sections);
-      templateIds[tmpl.name] = result.templateId;
-      statements.push(result.sql);
-    }
+  // ---------------------------------------------------------------
+  // 0. Modifier Templates — per-item cloning
+  //    POS requires one modifier template per menu item. We clone
+  //    each shared template once per assigned item, naming the clone
+  //    after the item (e.g., "CHEESEBURGER" template for the
+  //    Cheeseburger item). This lets operators customize modifiers
+  //    per item later.
+  // ---------------------------------------------------------------
+  // Build a map: templateName → template definition
+  const templateDefMap = new Map<string, ParsedModifierTemplate>();
+  for (const tmpl of modifierTemplates) {
+    templateDefMap.set(tmpl.name, tmpl);
   }
+
+  // We'll generate per-item templates during item processing (section 3)
+  // and store the per-item template ID here: itemName → templateId
+  const perItemTemplateIds: Record<string, string> = {};
 
   // ---------------------------------------------------------------
   // 1. Menu Categories
@@ -152,8 +177,42 @@ export function generateFullDeployment(opts: {
   }
 
   // ---------------------------------------------------------------
-  // 3. Menu Items + Printer Assignments
+  // 3. Per-Item Modifier Templates + Menu Items + Printer Assignments
+  //    Generate per-item template clones BEFORE inserting items
+  //    so the template IDs are available for the MenuModifierTemplateId column.
   // ---------------------------------------------------------------
+
+  // First pass: generate per-item templates
+  const templateStatements: string[] = [];
+  const usedTemplateNames = new Set<string>();
+
+  for (const item of items) {
+    const assignedTemplateName =
+      templateAssignments[item.name] ?? templateAssignments[item.group];
+    if (!assignedTemplateName) continue;
+
+    const tmplDef = templateDefMap.get(assignedTemplateName);
+    if (!tmplDef) continue;
+
+    // Clone template named after the item (uppercase for POS convention)
+    const perItemName = item.name.toUpperCase();
+    // Deduplicate — if two items have the same name, only first gets a template
+    if (usedTemplateNames.has(perItemName)) continue;
+    usedTemplateNames.add(perItemName);
+
+    const result = generateTemplateSql(perItemName, tmplDef.sections);
+    perItemTemplateIds[item.name] = result.templateId;
+    templateStatements.push(result.sql);
+  }
+
+  if (templateStatements.length > 0) {
+    statements.push("\n-- =============================================");
+    statements.push("-- MODIFIER TEMPLATES (per-item clones)");
+    statements.push("-- =============================================");
+    statements.push(...templateStatements);
+  }
+
+  // Second pass: menu items
   statements.push("\n-- =============================================");
   statements.push("-- MENU ITEMS");
   statements.push("-- =============================================");
@@ -181,21 +240,33 @@ export function generateFullDeployment(opts: {
     }
     groupRowCounter[item.group] = [nextRow, nextCol];
 
-    // Modifier template
-    let modTemplateId = "NULL";
-    const assignedTemplate =
-      templateAssignments[item.name] ?? templateAssignments[item.group];
-    if (assignedTemplate && templateIds[assignedTemplate]) {
-      modTemplateId = `'${templateIds[assignedTemplate]}'`;
-    }
+    // Per-item modifier template
+    const modTemplateId = perItemTemplateIds[item.name]
+      ? `'${perItemTemplateIds[item.name]}'`
+      : "NULL";
 
     const cidSql = cid ? `'${cid}'` : "NULL";
     const barcodeSql = item.barcode ? `'${esc(item.barcode)}'` : "NULL";
-    const itemPicSql = item.image_path
-      ? `'${esc(item.image_path)}'`
-      : item.image_url
-        ? `'${esc(deriveDestPath(item.image_url, item.name))}'`
-        : "NULL";
+
+    // Image path: handle data URIs (AI-generated), regular paths, and Supabase URLs
+    let itemPicSql = "NULL";
+    if (item.image_path && item.image_path.startsWith("data:")) {
+      // AI-generated image stored as data URI — deploy to POS
+      const destPath = `Food\\${deriveDestPath("", item.name)}`;
+      pendingImageTransfers.push({
+        type: "item",
+        name: item.name,
+        entityId: iid,
+        imageUrl: item.image_path,
+        destPath,
+      });
+      itemPicSql = `'${esc(destPath)}'`;
+    } else if (item.image_path) {
+      itemPicSql = `'${esc(item.image_path)}'`;
+    } else if (item.image_url) {
+      itemPicSql = `'${esc(deriveDestPath(item.image_url, item.name))}'`;
+    }
+
     const itemColorSql = item.color ? `'${esc(item.color)}'` : "NULL";
 
     statements.push(
@@ -241,10 +312,7 @@ export function generateFullDeployment(opts: {
   // 4. Forced Modifier Levels (3 blank per item with template)
   // ---------------------------------------------------------------
   const itemsWithTemplates = items
-    .filter(
-      (item) =>
-        templateAssignments[item.name] || templateAssignments[item.group],
-    )
+    .filter((item) => perItemTemplateIds[item.name])
     .map((item) => itemIds[item.name])
     .filter(Boolean);
 
@@ -299,16 +367,31 @@ export function generateFullDeployment(opts: {
   if (branding) {
     const brandingParts: string[] = [];
     const bg = branding.background as string | null;
+    const bgPicture = branding.background_picture as string | null;
     const btnBg = branding.buttons_background_color as string | null;
     const btnFg = branding.buttons_font_color as string | null;
     const sidebar = branding.sidebar_picture as string | null;
 
     const storeRows: [string, string][] = [];
-    if (bg && !bg.startsWith("data:")) storeRows.push(["Background", bg]);
-    if (btnBg && !btnBg.startsWith("data:"))
-      storeRows.push(["ButtonsBackgroundColor", btnBg]);
-    if (btnFg && !btnFg.startsWith("data:"))
-      storeRows.push(["ButtonsFontColor", btnFg]);
+
+    // Background: if a picture is set, deploy the image and use the path as
+    // the Background storesetting value. Otherwise use the hex color.
+    if (bgPicture) {
+      const destPath = "Background\\generated_bg.png";
+      pendingImageTransfers.push({
+        type: "branding",
+        name: "Background Image",
+        entityId: undefined,
+        imageUrl: bgPicture,
+        destPath,
+      });
+      storeRows.push(["Background", destPath]);
+    } else if (bg) {
+      storeRows.push(["Background", bg]);
+    }
+
+    if (btnBg) storeRows.push(["ButtonsBackgroundColor", btnBg]);
+    if (btnFg) storeRows.push(["ButtonsFontColor", btnFg]);
 
     if (storeRows.length > 0) {
       brandingParts.push("-- =============================================");
@@ -322,14 +405,29 @@ export function generateFullDeployment(opts: {
       }
     }
 
-    if (sidebar && !sidebar.startsWith("data:")) {
+    // Sidebar: deploy the image and use the path
+    if (sidebar) {
+      const sidebarPath = sidebar.startsWith("data:")
+        ? "Sidebar\\generated_sidebar.png"
+        : sidebar;
+
+      if (sidebar.startsWith("data:")) {
+        pendingImageTransfers.push({
+          type: "branding",
+          name: "Sidebar Image",
+          entityId: undefined,
+          imageUrl: sidebar,
+          destPath: sidebarPath,
+        });
+      }
+
       brandingParts.push("\n-- =============================================");
       brandingParts.push("-- STATION SIDEBAR PICTURE");
       brandingParts.push("-- =============================================");
       brandingParts.push(
         `UPDATE \`stationsettingsvalues\` ssv ` +
           `JOIN \`stationsettingsnames\` ssn ON ssv.NameId = ssn.Id ` +
-          `SET ssv.\`Value\` = '${esc(sidebar)}', ssv.\`ModifiedOn\` = '${ts}' ` +
+          `SET ssv.\`Value\` = '${esc(sidebarPath)}', ssv.\`ModifiedOn\` = '${ts}' ` +
           `WHERE ssn.\`Key\` = 'SidebarPicture' AND ssv.\`IsDeleted\` = 0;`,
       );
     }
@@ -340,11 +438,11 @@ export function generateFullDeployment(opts: {
   }
 
   // ---------------------------------------------------------------
-  // Collect pending image transfers
+  // Collect pending image transfers (item + group images)
   // ---------------------------------------------------------------
-  const pendingImageTransfers: PendingImageTransfer[] = [];
-
   for (const item of items) {
+    // Skip items with data URI image_path — already added during item SQL generation
+    if (item.image_path?.startsWith("data:")) continue;
     if (item.image_url) {
       pendingImageTransfers.push({
         type: "item",
@@ -376,7 +474,7 @@ export function generateFullDeployment(opts: {
       groups: groups.size,
       menuItems: items.length,
       printers: items.length,
-      modifierTemplates: modifierTemplates.length,
+      modifierTemplates: usedTemplateNames.size,
       rooms: roomCount,
       tables: tableCount,
       pendingImageTransfers: pendingImageTransfers.length,

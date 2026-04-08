@@ -30,6 +30,7 @@ import { serializeDesignConfig } from "@/lib/serializer";
 import { SqlPreview } from "@/components/deploy/SqlPreview";
 import { DeployStatusCard } from "@/components/deploy/DeployStatus";
 import { ConnectionForm } from "@/components/deploy/ConnectionForm";
+import { ConnectionStatus } from "@/components/deploy/ConnectionStatus";
 import { toast } from "sonner";
 import type { SavedConnection } from "@/lib/types";
 
@@ -138,6 +139,7 @@ export default function DeployPage({
       const brandingConfig = {
         background: branding.background,
         background_url: null,
+        background_picture: branding.background_picture,
         buttons_background_color: branding.buttons_background_color,
         buttons_font_color: branding.buttons_font_color,
         sidebar_picture: branding.sidebar_picture,
@@ -185,9 +187,50 @@ export default function DeployPage({
   ]);
 
   const handleStageDeploy = useCallback(async () => {
-    if (!generatedSql) return;
+    if (items.length === 0) return;
     try {
       setDeployStatus("queued");
+
+      // Always regenerate SQL fresh before staging — ensures images, colors, and
+      // modifier assignments are in sync with the current design state.
+      const freshSql = await (async () => {
+        const designState = {
+          id: null,
+          name: "Untitled",
+          restaurantName: restaurantName || "",
+          restaurantType: null,
+          isDirty: false,
+          origin: { type: "menu_import" as const },
+          categories: [
+            { name: "Food" as const, sortOrder: 0 },
+            { name: "Beverages" as const, sortOrder: 1 },
+            { name: "Bar" as const, sortOrder: 2 },
+          ],
+          groups,
+          items,
+          brandAssets: [],
+          rooms,
+        };
+        const brandingConfig = {
+          background: branding.background,
+          background_url: null,
+          background_picture: branding.background_picture,
+          buttons_background_color: branding.buttons_background_color,
+          buttons_font_color: branding.buttons_font_color,
+          sidebar_picture: branding.sidebar_picture,
+          sidebar_picture_url: null,
+        };
+        const config = serializeDesignConfig(designState, modifierTemplates, brandingConfig);
+        const res = await fetch("/api/generate-sql", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(config),
+        });
+        if (!res.ok) throw new Error("SQL generation failed");
+        const data = await res.json();
+        setStagedDeploy(data.sql, data.stats, data.pendingImageTransfers || []);
+        return data;
+      })();
 
       // Build deploy target from selected connection
       const conn = savedConnections.find(
@@ -208,17 +251,15 @@ export default function DeployPage({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           sessionId: id,
-          sql: generatedSql,
-          stats: deployStats,
-          pendingImages: useStore.getState().pendingImages,
+          sql: freshSql.sql,
+          stats: freshSql.stats,
+          pendingImages: freshSql.pendingImageTransfers || [],
           deployTarget,
         }),
       });
 
       if (!res.ok) {
-        const err = await res
-          .json()
-          .catch(() => ({ error: "Staging failed" }));
+        const err = await res.json().catch(() => ({ error: "Staging failed" }));
         throw new Error(err.error);
       }
 
@@ -230,8 +271,13 @@ export default function DeployPage({
     }
   }, [
     id,
-    generatedSql,
-    deployStats,
+    items,
+    groups,
+    rooms,
+    modifierTemplates,
+    restaurantName,
+    branding,
+    setStagedDeploy,
     setDeployStatus,
     activeConnectionId,
     savedConnections,
@@ -331,6 +377,11 @@ export default function DeployPage({
               />
             </div>
           )}
+
+          {/* Connection status indicator */}
+          <div className="mt-3">
+            <ConnectionStatus />
+          </div>
         </CardContent>
       </Card>
 

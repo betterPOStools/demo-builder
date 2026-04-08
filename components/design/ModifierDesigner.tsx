@@ -9,33 +9,181 @@ import {
   Pencil,
   Check,
   X,
+  Sparkles,
+  BookTemplate,
+  Loader2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { useStore } from "@/store";
-import { cn } from "@/lib/utils";
+import { cn, generateId } from "@/lib/utils";
+import { MODIFIER_PRESETS, PRESET_LIST } from "@/lib/modifierPresets";
 
 export function ModifierDesigner() {
   const templates = useStore((s) => s.modifierTemplates);
   const addTemplate = useStore((s) => s.addTemplate);
+  const loadTemplates = useStore((s) => s.loadTemplates);
+  const items = useStore((s) => s.items);
+  const groups = useStore((s) => s.groups);
+  const restaurantName = useStore((s) => s.restaurantName);
+
+  const [isInferring, setIsInferring] = useState(false);
+  const [showPresets, setShowPresets] = useState(false);
+
+  function addPreset(presetKey: string) {
+    const preset = MODIFIER_PRESETS[presetKey];
+    if (!preset) return;
+    const newTemplate = {
+      id: generateId(),
+      name: preset.name,
+      source: "preset" as const,
+      restaurantType: null,
+      sections: preset.sections.map((sec) => ({
+        id: generateId(),
+        name: sec.name,
+        sortOrder: 0,
+        minSelections: sec.minSelections,
+        maxSelections: sec.maxSelections,
+        gridColumns: 3,
+        modifiers: sec.modifiers.map((mod, i) => ({
+          id: generateId(),
+          name: mod.name,
+          price: mod.price,
+          sortOrder: i,
+          isDefault: mod.isDefault ?? false,
+          imageAssetId: null,
+          posImagePath: null,
+          isPizzaCrust: false,
+          isPizzaTopping: false,
+          isBarMixer: false,
+          isBarDrink: false,
+        })),
+      })),
+    };
+    loadTemplates([...templates, newTemplate]);
+    setShowPresets(false);
+  }
+
+  async function inferModifiers() {
+    if (!items.length) return;
+    setIsInferring(true);
+    try {
+      const payload = items.map((item) => {
+        const group = groups.find((g) => g.id === item.groupId);
+        return {
+          name: item.name,
+          price: item.defaultPrice,
+          group: group?.name || "Unknown",
+        };
+      });
+      const res = await fetch("/api/infer-modifiers", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ items: payload, restaurantName }),
+      });
+      if (!res.ok) throw new Error("Failed to infer modifiers");
+      const data = await res.json();
+      if (data.templates?.length) {
+        const newTemplates = data.templates.map(
+          (t: { name: string; sections: { name: string; min_selections: number; max_selections: number; modifiers: { name: string; price: number; is_default?: boolean }[] }[] }) => ({
+            id: generateId(),
+            name: t.name,
+            source: "ai" as const,
+            restaurantType: null,
+            sections: t.sections.map((sec: { name: string; min_selections: number; max_selections: number; modifiers: { name: string; price: number; is_default?: boolean }[] }) => ({
+              id: generateId(),
+              name: sec.name,
+              sortOrder: 0,
+              minSelections: sec.min_selections,
+              maxSelections: sec.max_selections,
+              gridColumns: 3,
+              modifiers: sec.modifiers.map((mod: { name: string; price: number; is_default?: boolean }, i: number) => ({
+                id: generateId(),
+                name: mod.name,
+                price: mod.price,
+                sortOrder: i,
+                isDefault: mod.is_default ?? false,
+                imageAssetId: null,
+                posImagePath: null,
+                isPizzaCrust: false,
+                isPizzaTopping: false,
+                isBarMixer: false,
+                isBarDrink: false,
+              })),
+            })),
+          }),
+        );
+        loadTemplates([...templates, ...newTemplates]);
+      }
+    } catch (err) {
+      console.error("Modifier inference failed:", err);
+    } finally {
+      setIsInferring(false);
+    }
+  }
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-2">
         <p className="text-sm text-slate-400">
           {templates.length} modifier template
           {templates.length !== 1 ? "s" : ""}
         </p>
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() => addTemplate("New Template")}
-          className="gap-1.5"
-        >
-          <Plus className="h-3.5 w-3.5" />
-          Add Template
-        </Button>
+        <div className="flex items-center gap-1.5">
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => setShowPresets(!showPresets)}
+            className="gap-1.5 text-xs"
+          >
+            <BookTemplate className="h-3.5 w-3.5" />
+            Presets
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={inferModifiers}
+            disabled={isInferring || !items.length}
+            className="gap-1.5 text-xs"
+          >
+            {isInferring ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Sparkles className="h-3.5 w-3.5 text-amber-400" />
+            )}
+            AI Suggest
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => addTemplate("New Template")}
+            className="gap-1.5 text-xs"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            Add
+          </Button>
+        </div>
       </div>
+
+      {/* Preset selector */}
+      {showPresets && (
+        <div className="grid grid-cols-2 gap-1.5 rounded-lg border border-slate-700 bg-slate-800/50 p-2">
+          {PRESET_LIST.map((p) => (
+            <button
+              key={p.key}
+              onClick={() => addPreset(p.key)}
+              className="rounded-md border border-slate-700/50 bg-slate-800 px-2.5 py-2 text-left hover:border-blue-500/50 hover:bg-slate-700/50"
+            >
+              <div className="text-xs font-medium text-slate-200">
+                {p.name}
+              </div>
+              <div className="text-[10px] text-slate-500">
+                {p.description}
+              </div>
+            </button>
+          ))}
+        </div>
+      )}
 
       {templates.length === 0 ? (
         <Card className="border-dashed">
@@ -44,8 +192,7 @@ export function ModifierDesigner() {
               No modifier templates
             </p>
             <p className="text-xs text-slate-500">
-              Templates define customization options like sizes, toppings, and
-              add-ons.
+              Add presets, use AI to suggest, or create templates manually.
             </p>
           </CardContent>
         </Card>

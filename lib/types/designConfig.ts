@@ -91,6 +91,7 @@ export interface DesignConfigTable {
 export interface DesignConfigBranding {
   background: string | null;
   background_url: string | null;
+  background_picture: string | null;
   buttons_background_color: string | null;
   buttons_font_color: string | null;
   sidebar_picture: string | null;
