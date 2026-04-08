@@ -54,7 +54,7 @@ export const useStore = create<StoreState>()((...a) => ({
         buttons_font_color: null,
         sidebar_picture: null,
       },
-      imageLibrary: [],
+      // imageLibrary intentionally preserved — it's global across projects (localStorage)
       designOrigin: { type: "fresh" },
       isDirty: false,
       // Modifiers
@@ -84,7 +84,7 @@ export const useStore = create<StoreState>()((...a) => ({
       if (ds.items) patch.items = ds.items;
       if (ds.rooms) patch.rooms = ds.rooms;
       if (ds.branding) patch.branding = ds.branding;
-      if (ds.imageLibrary) patch.imageLibrary = ds.imageLibrary;
+      // imageLibrary not loaded from session — it's global (managed via localStorage by useImageLibrarySync)
       if (ds.designOrigin) patch.designOrigin = ds.designOrigin;
     }
 

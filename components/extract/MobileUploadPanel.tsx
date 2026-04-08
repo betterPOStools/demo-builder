@@ -22,10 +22,12 @@ export function MobileUploadPanel({ sessionId }: { sessionId: string }) {
   const { processUrl } = useExtraction();
   const addFiles = useStore((s) => s.addFiles);
 
-  const uploadUrl =
-    typeof window !== "undefined"
-      ? `${window.location.origin}/upload/${sessionId}`
-      : "";
+  // Use configured network URL if available (avoids QR pointing to localhost).
+  // Falls back to window.location.origin (correct in Vercel prod).
+  const networkBase =
+    process.env.NEXT_PUBLIC_NETWORK_URL ||
+    (typeof window !== "undefined" ? window.location.origin : "");
+  const uploadUrl = networkBase ? `${networkBase}/upload/${sessionId}` : "";
 
   // Generate QR code
   useEffect(() => {

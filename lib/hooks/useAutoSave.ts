@@ -34,8 +34,7 @@ export function useAutoSave(projectId: string) {
         state.extractedModifiers === prev.extractedModifiers &&
         state.restaurantName === prev.restaurantName &&
         state.currentStep === prev.currentStep &&
-        state.branding === prev.branding &&
-        state.imageLibrary === prev.imageLibrary
+        state.branding === prev.branding
       ) {
         return;
       }
@@ -61,7 +60,6 @@ export function useAutoSave(projectId: string) {
                   items: s.items,
                   rooms: s.rooms,
                   branding: s.branding,
-                  imageLibrary: s.imageLibrary,
                   designOrigin: s.designOrigin,
                 }
               : null,

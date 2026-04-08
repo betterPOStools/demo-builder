@@ -1,10 +1,10 @@
 "use client";
 
-import { use, useEffect, useRef, useState } from "react";
+import { use, useEffect, useId, useState } from "react";
 import { Camera, ImagePlus, CheckCircle2, Loader2, Upload } from "lucide-react";
-import { Button } from "@/components/ui/button";
 
 interface UploadedFile {
+  key: string;
   name: string;
   url: string;
   preview: string;
@@ -23,9 +23,12 @@ function resizeImage(file: File, maxPx = 1800): Promise<Blob> {
       const canvas = document.createElement("canvas");
       canvas.width = w;
       canvas.height = h;
-      const ctx = canvas.getContext("2d")!;
-      ctx.drawImage(img, 0, 0, w, h);
-      canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("Canvas error"))), "image/jpeg", 0.82);
+      canvas.getContext("2d")!.drawImage(img, 0, 0, w, h);
+      canvas.toBlob(
+        (b) => (b ? resolve(b) : reject(new Error("Canvas error"))),
+        "image/jpeg",
+        0.82,
+      );
     };
     img.onerror = reject;
     img.src = url;
@@ -40,8 +43,8 @@ export default function MobileUploadPage({
   const { id: sessionId } = use(params);
   const [restaurantName, setRestaurantName] = useState<string | null>(null);
   const [uploads, setUploads] = useState<UploadedFile[]>([]);
-  const cameraRef = useRef<HTMLInputElement>(null);
-  const galleryRef = useRef<HTMLInputElement>(null);
+  const cameraId = useId();
+  const galleryId = useId();
 
   useEffect(() => {
     fetch(`/api/sessions/${sessionId}`)
@@ -56,22 +59,14 @@ export default function MobileUploadPage({
     for (const file of Array.from(files)) {
       if (!file.type.startsWith("image/") && file.type !== "application/pdf") continue;
 
+      const key = `${file.name}-${Date.now()}`;
       const preview = file.type.startsWith("image/") ? URL.createObjectURL(file) : "";
-      const entry: UploadedFile = {
-        name: file.name,
-        url: "",
-        preview,
-        status: "uploading",
-      };
-      setUploads((prev) => [...prev, entry]);
-      const idx = uploads.length; // capture current length as index
+
+      setUploads((prev) => [...prev, { key, name: file.name, url: "", preview, status: "uploading" }]);
 
       try {
-        // Resize images before upload
         let blob: Blob = file;
-        if (file.type.startsWith("image/")) {
-          blob = await resizeImage(file);
-        }
+        if (file.type.startsWith("image/")) blob = await resizeImage(file);
 
         const fd = new FormData();
         fd.append("file", blob, file.name.replace(/\.[^.]+$/, ".jpg"));
@@ -81,19 +76,11 @@ export default function MobileUploadPage({
         const data = await res.json();
 
         setUploads((prev) =>
-          prev.map((u, i) =>
-            u.name === file.name && u.status === "uploading"
-              ? { ...u, url: data.url, status: "done" }
-              : u,
-          ),
+          prev.map((u) => (u.key === key ? { ...u, url: data.url, status: "done" } : u)),
         );
       } catch {
         setUploads((prev) =>
-          prev.map((u) =>
-            u.name === file.name && u.status === "uploading"
-              ? { ...u, status: "error" }
-              : u,
-          ),
+          prev.map((u) => (u.key === key ? { ...u, status: "error" } : u)),
         );
       }
     }
@@ -111,46 +98,45 @@ export default function MobileUploadPage({
         </h1>
       </div>
 
-      {/* Upload buttons */}
+      {/* Upload buttons — use <label> so iOS/Android file picker opens reliably */}
       <div className="flex flex-1 flex-col items-center justify-center gap-4 px-6 py-10">
         <p className="max-w-xs text-center text-sm text-slate-400">
           Take a photo of each menu page, or select from your camera roll.
         </p>
 
-        {/* Camera */}
-        <Button
-          className="h-16 w-full max-w-xs gap-3 text-base"
-          onClick={() => cameraRef.current?.click()}
+        {/* Camera — label wraps hidden input, no JS click needed */}
+        <label
+          htmlFor={cameraId}
+          className="flex h-16 w-full max-w-xs cursor-pointer items-center justify-center gap-3 rounded-md bg-blue-600 text-base font-medium text-white transition hover:bg-blue-500 active:bg-blue-700"
         >
           <Camera className="h-6 w-6" />
           Take Photo
-        </Button>
+        </label>
         <input
-          ref={cameraRef}
+          id={cameraId}
           type="file"
           accept="image/*"
           capture="environment"
-          className="hidden"
           multiple
-          onChange={(e) => handleFiles(e.target.files)}
+          className="hidden"
+          onChange={(e) => { handleFiles(e.target.files); e.target.value = ""; }}
         />
 
         {/* Gallery / PDF */}
-        <Button
-          variant="outline"
-          className="h-14 w-full max-w-xs gap-3 text-base"
-          onClick={() => galleryRef.current?.click()}
+        <label
+          htmlFor={galleryId}
+          className="flex h-14 w-full max-w-xs cursor-pointer items-center justify-center gap-3 rounded-md border border-slate-600 bg-transparent text-base font-medium text-slate-200 transition hover:border-slate-400 hover:text-white active:bg-slate-800"
         >
           <ImagePlus className="h-5 w-5" />
           Choose from Library
-        </Button>
+        </label>
         <input
-          ref={galleryRef}
+          id={galleryId}
           type="file"
           accept="image/*,application/pdf"
-          className="hidden"
           multiple
-          onChange={(e) => handleFiles(e.target.files)}
+          className="hidden"
+          onChange={(e) => { handleFiles(e.target.files); e.target.value = ""; }}
         />
       </div>
 
@@ -159,12 +145,12 @@ export default function MobileUploadPage({
         <div className="border-t border-slate-800 px-5 py-4">
           {doneCount > 0 && (
             <p className="mb-3 text-center text-sm text-green-400">
-              ✓ {doneCount} {doneCount === 1 ? "file" : "files"} sent to your laptop
+              ✓ {doneCount} {doneCount === 1 ? "file" : "files"} sent — you can take more
             </p>
           )}
           <div className="space-y-2">
-            {uploads.map((u, i) => (
-              <div key={i} className="flex items-center gap-3 rounded-lg bg-slate-800/60 px-3 py-2">
+            {uploads.map((u) => (
+              <div key={u.key} className="flex items-center gap-3 rounded-lg bg-slate-800/60 px-3 py-2">
                 {u.preview ? (
                   <img src={u.preview} alt="" className="h-10 w-10 rounded object-cover" />
                 ) : (
@@ -175,15 +161,9 @@ export default function MobileUploadPage({
                 <span className="min-w-0 flex-1 truncate text-sm text-slate-300">
                   {u.name.replace(/\.[^.]+$/, "")}
                 </span>
-                {u.status === "uploading" && (
-                  <Loader2 className="h-4 w-4 shrink-0 animate-spin text-blue-400" />
-                )}
-                {u.status === "done" && (
-                  <CheckCircle2 className="h-4 w-4 shrink-0 text-green-400" />
-                )}
-                {u.status === "error" && (
-                  <span className="text-xs text-red-400">Failed</span>
-                )}
+                {u.status === "uploading" && <Loader2 className="h-4 w-4 shrink-0 animate-spin text-blue-400" />}
+                {u.status === "done" && <CheckCircle2 className="h-4 w-4 shrink-0 text-green-400" />}
+                {u.status === "error" && <span className="text-xs text-red-400">Failed</span>}
               </div>
             ))}
           </div>

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { usePathname } from "next/navigation";
 import { useAuth, signInWithEmail, signOut } from "@/lib/hooks/useAuth";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -8,8 +9,17 @@ import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Layers, Loader2 } from "lucide-react";
 
+// Routes that don't require authentication (phone/public pages)
+const PUBLIC_PREFIXES = ["/upload"];
+
 export function AuthGate({ children }: { children: React.ReactNode }) {
+  const pathname = usePathname();
   const { user, loading } = useAuth();
+
+  // Public routes bypass auth entirely
+  if (PUBLIC_PREFIXES.some((p) => pathname.startsWith(p))) {
+    return <>{children}</>;
+  }
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);

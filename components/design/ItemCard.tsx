@@ -11,6 +11,8 @@ import type { ItemNode } from "@/lib/types";
 export function ItemCard({ item }: { item: ItemNode }) {
   const deleteItem = useStore((s) => s.deleteItem);
   const updateItem = useStore((s) => s.updateItem);
+  const addTemplateToItems = useStore((s) => s.addTemplateToItems);
+  const removeTemplateFromItems = useStore((s) => s.removeTemplateFromItems);
   const modifierTemplates = useStore((s) => s.modifierTemplates);
   const groups = useStore((s) => s.groups);
   const branding = useStore((s) => s.branding);
@@ -20,6 +22,7 @@ export function ItemCard({ item }: { item: ItemNode }) {
   const [editPrice, setEditPrice] = useState(String(item.defaultPrice || ""));
   const [editColor, setEditColor] = useState(item.color || "");
   const [editImage, setEditImage] = useState(item.posImagePath || "");
+  const [editModTemplate, setEditModTemplate] = useState(item.modifierTemplateIds[0] || "");
 
   const {
     attributes,
@@ -64,6 +67,12 @@ export function ItemCard({ item }: { item: ItemNode }) {
         posImagePath: newImage,
       });
     }
+    // Modifier template assignment
+    const oldTid = item.modifierTemplateIds[0] || "";
+    if (editModTemplate !== oldTid) {
+      if (oldTid) removeTemplateFromItems([item.id], oldTid);
+      if (editModTemplate) addTemplateToItems([item.id], editModTemplate);
+    }
     setIsEditing(false);
   }
 
@@ -72,6 +81,7 @@ export function ItemCard({ item }: { item: ItemNode }) {
     setEditPrice(String(item.defaultPrice || ""));
     setEditColor(item.color || "");
     setEditImage(item.posImagePath || "");
+    setEditModTemplate(item.modifierTemplateIds[0] || "");
     setIsEditing(true);
   }
 
@@ -131,6 +141,21 @@ export function ItemCard({ item }: { item: ItemNode }) {
             className="h-6 flex-1 rounded border border-slate-600 bg-slate-900 px-1.5 text-[10px] text-slate-400 focus:border-blue-500 focus:outline-none"
           />
         </div>
+        {modifierTemplates.length > 0 && (
+          <div className="flex items-center gap-1.5">
+            <span className="shrink-0 text-[10px] text-slate-500">Modifier</span>
+            <select
+              value={editModTemplate}
+              onChange={(e) => setEditModTemplate(e.target.value)}
+              className="h-6 flex-1 rounded border border-slate-600 bg-slate-900 px-1.5 text-[10px] text-slate-400 focus:border-blue-500 focus:outline-none"
+            >
+              <option value="">— none —</option>
+              {modifierTemplates.map((t) => (
+                <option key={t.id} value={t.id}>{t.name}</option>
+              ))}
+            </select>
+          </div>
+        )}
         <div className="flex justify-end gap-1.5">
           <button
             onClick={() => setIsEditing(false)}
