@@ -170,6 +170,8 @@ export function cloneBundle(bundle: RestaurantBundle): ClonedBundle {
           name: t.name,
           seats: t.capacity ?? 4,
           isBarStool: t.is_bar_stool ?? false,
+          rowIndex: t.row_index ?? 0,
+          columnIndex: t.column_index ?? 0,
           color: null,
           posImagePath: null,
           imageAssetId: null,

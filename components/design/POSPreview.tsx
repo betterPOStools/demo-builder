@@ -428,7 +428,9 @@ function OrderScreen({
               }}
             >
               {hasModifier && (
-                <div className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-yellow-400" />
+                <div className="absolute right-1 top-1 rounded bg-yellow-400 px-0.5 text-[7px] font-bold leading-tight text-black">
+                  MOD
+                </div>
               )}
               <span className="line-clamp-2 text-center text-[10px] font-semibold leading-tight">
                 {item.name}

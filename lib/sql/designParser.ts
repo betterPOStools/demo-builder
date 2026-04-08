@@ -232,28 +232,17 @@ export function parseDesignConfig(config: DesignConfigV2): ParsedDesignConfig {
 
   // Convert rooms → deployer-compatible format with grid positioning
   const rooms = config.rooms.map((r) => {
-    let tRow = 0;
-    let tCol = 0;
-    const maxCols = 6; // default table grid width
     return {
       name: r.name,
       color: r.color,
       grid_size: r.grid_size,
-      tables: r.tables.map((t) => {
-        const table = {
-          name: t.name,
-          capacity: t.seats,
-          is_bar_stool: t.is_bar_stool,
-          row_index: tRow,
-          column_index: tCol,
-        };
-        tCol++;
-        if (tCol >= maxCols) {
-          tCol = 0;
-          tRow++;
-        }
-        return table;
-      }),
+      tables: r.tables.map((t) => ({
+        name: t.name,
+        capacity: t.seats,
+        is_bar_stool: t.is_bar_stool,
+        row_index: t.row_index ?? 0,
+        column_index: t.column_index ?? 0,
+      })),
     };
   });
 

@@ -81,6 +81,8 @@ export interface DesignConfigTable {
   name: string;
   seats: number;
   is_bar_stool: boolean;
+  row_index: number;
+  column_index: number;
   color: string | null;
   image_path: string | null;
   image_url: string | null;

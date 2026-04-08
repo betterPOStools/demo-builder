@@ -216,6 +216,8 @@ export function serializeDesignConfig(
         name: t.name,
         seats: t.seats,
         is_bar_stool: t.isBarStool,
+        row_index: t.rowIndex ?? 0,
+        column_index: t.columnIndex ?? 0,
         color: t.color ?? null,
         image_path: t.posImagePath ?? null,
         image_url: resolveImageUrl(t.imageAssetId, assetMap),

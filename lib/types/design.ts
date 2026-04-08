@@ -71,6 +71,8 @@ export interface TableNode {
   name: string;
   seats: number;
   isBarStool: boolean;
+  rowIndex: number;
+  columnIndex: number;
   color: string | null;
   posImagePath: string | null;
   imageAssetId: string | null;
