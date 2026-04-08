@@ -88,7 +88,7 @@ Rules:
 - Choose a Google Font that matches the cuisine/vibe and @import it
 - Font size: ${titleFontSize}px, bold or display weight — MUST fit on ONE LINE, no wrapping
 - Add white-space: nowrap and max-width: 340px; overflow: hidden to the title element
-- Position: lower-third or vertically centered
+- Position: lower-third — bottom edge of text must be at least 48px from the bottom of the canvas
 - Add text-shadow (2–4px blur, dark) so it reads against any background
 - Color: white or a bright accent — must be legible`
         : `NO text, NO words anywhere in the design.`;
@@ -165,7 +165,7 @@ STRUCTURE:
 - Font size: ${titleFontSize}px, bold or display weight — MUST fit on ONE LINE, no wrapping
 - Add white-space: nowrap to the title element so it never wraps
 - Width constraint: max-width: 340px; overflow: hidden on the title element
-- Position: lower-third (bottom 200px) or vertically centered — whichever suits the composition
+- Position: lower-third — bottom edge of text must be at least 48px from the bottom of the canvas
 - text-shadow: 0 2px 8px rgba(0,0,0,0.6) for legibility
 - Color: white or a bright accent color that pops`
         : `NO text, NO words anywhere.`;
