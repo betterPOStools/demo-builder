@@ -23,11 +23,13 @@ export function ModifierDesigner() {
   const templates = useStore((s) => s.modifierTemplates);
   const addTemplate = useStore((s) => s.addTemplate);
   const loadTemplates = useStore((s) => s.loadTemplates);
+  const addTemplateToItems = useStore((s) => s.addTemplateToItems);
   const items = useStore((s) => s.items);
   const groups = useStore((s) => s.groups);
   const restaurantName = useStore((s) => s.restaurantName);
 
   const [isInferring, setIsInferring] = useState(false);
+  const [inferStats, setInferStats] = useState<{ templates: number; assigned: number } | null>(null);
   const [showPresets, setShowPresets] = useState(false);
 
   function addPreset(presetKey: string) {
@@ -67,14 +69,11 @@ export function ModifierDesigner() {
   async function inferModifiers() {
     if (!items.length) return;
     setIsInferring(true);
+    setInferStats(null);
     try {
       const payload = items.map((item) => {
         const group = groups.find((g) => g.id === item.groupId);
-        return {
-          name: item.name,
-          price: item.defaultPrice,
-          group: group?.name || "Unknown",
-        };
+        return { name: item.name, price: item.defaultPrice, group: group?.name || "Unknown" };
       });
       const res = await fetch("/api/infer-modifiers", {
         method: "POST",
@@ -83,21 +82,34 @@ export function ModifierDesigner() {
       });
       if (!res.ok) throw new Error("Failed to infer modifiers");
       const data = await res.json();
+
+      type RawMod = { name: string; price: number; is_default?: boolean };
+      type RawSection = { name: string; min_selections: number; max_selections: number; modifiers: RawMod[] };
+      type RawTemplate = { name: string; applies_to?: string[]; sections: RawSection[] };
+
       if (data.templates?.length) {
-        const newTemplates = data.templates.map(
-          (t: { name: string; sections: { name: string; min_selections: number; max_selections: number; modifiers: { name: string; price: number; is_default?: boolean }[] }[] }) => ({
+        // Build item name → id lookup (case-insensitive)
+        const itemByName = new Map<string, string>();
+        for (const item of items) {
+          itemByName.set(item.name.toLowerCase(), item.id);
+        }
+
+        const newTemplates: Array<ReturnType<typeof buildTemplate> & { _appliesTo: string[] }> = [];
+
+        function buildTemplate(t: RawTemplate) {
+          return {
             id: generateId(),
             name: t.name,
             source: "ai" as const,
             restaurantType: null,
-            sections: t.sections.map((sec: { name: string; min_selections: number; max_selections: number; modifiers: { name: string; price: number; is_default?: boolean }[] }) => ({
+            sections: t.sections.map((sec) => ({
               id: generateId(),
               name: sec.name,
               sortOrder: 0,
               minSelections: sec.min_selections,
               maxSelections: sec.max_selections,
               gridColumns: 3,
-              modifiers: sec.modifiers.map((mod: { name: string; price: number; is_default?: boolean }, i: number) => ({
+              modifiers: sec.modifiers.map((mod, i) => ({
                 id: generateId(),
                 name: mod.name,
                 price: mod.price,
@@ -111,9 +123,30 @@ export function ModifierDesigner() {
                 isBarDrink: false,
               })),
             })),
-          }),
-        );
+          };
+        }
+
+        for (const t of data.templates as RawTemplate[]) {
+          newTemplates.push({ ...buildTemplate(t), _appliesTo: t.applies_to ?? [] });
+        }
+
         loadTemplates([...templates, ...newTemplates]);
+
+        // Auto-assign each template to its matching items
+        let totalAssigned = 0;
+        for (const tmpl of newTemplates) {
+          const matchedIds: string[] = [];
+          for (const name of tmpl._appliesTo) {
+            const id = itemByName.get(name.toLowerCase());
+            if (id) matchedIds.push(id);
+          }
+          if (matchedIds.length > 0) {
+            addTemplateToItems(matchedIds, tmpl.id);
+            totalAssigned += matchedIds.length;
+          }
+        }
+
+        setInferStats({ templates: newTemplates.length, assigned: totalAssigned });
       }
     } catch (err) {
       console.error("Modifier inference failed:", err);
@@ -164,6 +197,14 @@ export function ModifierDesigner() {
           </Button>
         </div>
       </div>
+
+      {/* AI assignment result */}
+      {inferStats && (
+        <p className="text-xs text-green-400">
+          ✓ {inferStats.templates} template{inferStats.templates !== 1 ? "s" : ""} created,{" "}
+          {inferStats.assigned} item{inferStats.assigned !== 1 ? "s" : ""} auto-assigned
+        </p>
+      )}
 
       {/* Preset selector */}
       {showPresets && (

@@ -19,17 +19,18 @@ export async function POST(request: Request) {
 
     const msg = await client.messages.create({
       model: "claude-haiku-4-5-20251001",
-      max_tokens: 2048,
+      max_tokens: 4096,
       messages: [
         {
           role: "user",
-          content: `You are a restaurant menu expert. Based on the following menu items${restaurantName ? ` from "${restaurantName}"` : ""}, suggest modifier templates that would be appropriate.
+          content: `You are a restaurant menu expert. Based on the following menu items${restaurantName ? ` from "${restaurantName}"` : ""}, suggest modifier templates and which items each template applies to.
 
 Menu items:
 ${itemList}
 
 Return a JSON array of modifier templates. Each template should have:
 - name: template name (e.g., "Pizza Toppings", "Meat Temperature")
+- applies_to: array of EXACT item names from the menu above that should use this template
 - sections: array of sections, each with:
   - name: section name
   - min_selections: minimum required (0 for optional)
@@ -43,8 +44,9 @@ Rules:
 - Group related items under one template (e.g., all burgers share "Meat Temperature")
 - Don't create a template if fewer than 2 items would use it
 - Maximum 5 templates
+- applies_to must contain exact item names from the list above (copy them verbatim)
 
-Return ONLY valid JSON, no markdown or explanation.`,
+Return ONLY valid JSON array, no markdown or explanation.`,
         },
       ],
     });
