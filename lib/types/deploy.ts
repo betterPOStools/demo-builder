@@ -7,6 +7,7 @@ export interface SavedConnection {
   port: number;
   database_name: string;
   username: string;
+  password_encrypted: string | null;
   upload_server_url: string | null;
   created_at: string;
 }
@@ -27,6 +28,8 @@ export interface DeployResult {
   timestamp: string;
   images_pushed: number;
   images_failed: number;
+  pos_restarted?: boolean;
+  pos_running?: boolean;
 }
 
 export interface StagedSession {

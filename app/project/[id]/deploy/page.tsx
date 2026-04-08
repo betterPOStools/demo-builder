@@ -199,8 +199,7 @@ export default function DeployPage({
             port: conn.port,
             database: conn.database_name,
             user: conn.username,
-            password: "", // Agent uses its own .env credentials
-            upload_server_url: conn.upload_server_url || undefined,
+            password: conn.password_encrypted || "123456",
           }
         : undefined;
 

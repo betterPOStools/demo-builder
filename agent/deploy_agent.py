@@ -3,7 +3,7 @@
 Demo Builder Deploy Agent
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 Lightweight agent that runs on your laptop. Polls Supabase for queued deployments,
-executes SQL against MariaDB, and pushes images via the POS upload server.
+executes SQL against MariaDB, pushes images via SCP, and restarts the POS via SSH.
 
 Usage:
     python deploy_agent.py
@@ -11,18 +11,23 @@ Usage:
 Environment variables (in .env):
     SUPABASE_URL        — Supabase project URL
     SUPABASE_KEY        — Supabase service role key (or anon key)
-    DB_HOST             — MariaDB host (default: 192.168.40.141)
+    DB_HOST             — MariaDB host (default: 100.112.68.19)
     DB_PORT             — MariaDB port (default: 3306)
     DB_USER             — MariaDB user (default: root)
-    DB_PASSWORD          — MariaDB password
+    DB_PASSWORD         — MariaDB password (default: 123456)
     DB_NAME             — MariaDB database name (default: pecandemodb)
-    UPLOAD_SERVER_URL   — POS upload server (default: http://192.168.40.141:8081)
+    SSH_HOST            — SSH host for image push + POS restart (default: DB_HOST)
+    SSH_USER            — SSH user (default: admin)
+    POS_IMAGES_DIR      — POS images directory (default: C:\\Program Files\\Pecan Solutions\\Pecan POS\\images)
+    POS_EXE             — POS executable path (default: C:\\Program Files\\Pecan Solutions\\Pecan POS\\Pecan POS.exe)
     POLL_INTERVAL       — Seconds between polls (default: 5)
 """
 
 import json
 import os
+import subprocess
 import sys
+import tempfile
 import time
 import traceback
 from datetime import datetime, timezone
@@ -49,12 +54,15 @@ load_env()
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
-DB_HOST = os.environ.get("DB_HOST", "192.168.40.141")
+DB_HOST = os.environ.get("DB_HOST", "100.112.68.19")
 DB_PORT = int(os.environ.get("DB_PORT", "3306"))
 DB_USER = os.environ.get("DB_USER", "root")
 DB_PASSWORD = os.environ.get("DB_PASSWORD", "123456")
 DB_NAME = os.environ.get("DB_NAME", "pecandemodb")
-UPLOAD_SERVER_URL = os.environ.get("UPLOAD_SERVER_URL", "http://192.168.40.141:8081")
+SSH_HOST = os.environ.get("SSH_HOST", "")  # defaults to DB_HOST
+SSH_USER = os.environ.get("SSH_USER", "admin")
+POS_IMAGES_DIR = os.environ.get("POS_IMAGES_DIR", r"C:\Program Files\Pecan Solutions\Pecan POS\images")
+POS_EXE = os.environ.get("POS_EXE", r"C:\Program Files\Pecan Solutions\Pecan POS\Pecan POS.exe")
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "5"))
 
 HEADERS = {
@@ -65,6 +73,31 @@ HEADERS = {
     "Accept-Profile": "demo_builder",
     "Content-Profile": "demo_builder",
 }
+
+# ---------------------------------------------------------------------------
+# SSH helpers
+# ---------------------------------------------------------------------------
+
+def ssh_cmd(host, cmd, user=None, timeout=10):
+    """Run a command on a remote machine via SSH. Returns (ok, stdout, stderr)."""
+    user = user or SSH_USER
+    try:
+        result = subprocess.run(
+            ["ssh", "-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=no",
+             f"{user}@{host}", cmd],
+            capture_output=True, text=True, timeout=timeout,
+        )
+        return result.returncode == 0, result.stdout.strip(), result.stderr.strip()
+    except subprocess.TimeoutExpired:
+        return False, "", "SSH command timed out"
+    except Exception as e:
+        return False, "", str(e)
+
+
+def ssh_available(host, user=None):
+    """Check if SSH is reachable."""
+    ok, out, _ = ssh_cmd(host, "echo ok", user=user, timeout=6)
+    return ok and "ok" in out
 
 # ---------------------------------------------------------------------------
 # Supabase helpers
@@ -113,7 +146,6 @@ def execute_sql(sql, deploy_target=None):
     try:
         cursor.execute("SET FOREIGN_KEY_CHECKS=0")
 
-        # Split into individual statements and execute
         for stmt in sql.split(";"):
             stmt = stmt.strip()
             if not stmt or stmt.startswith("--"):
@@ -123,7 +155,6 @@ def execute_sql(sql, deploy_target=None):
                 total_rows += cursor.rowcount if cursor.rowcount > 0 else 0
             except mysql.connector.Error as e:
                 print(f"  [WARN] Statement failed: {e.msg[:100]}")
-                # Continue with remaining statements
 
         cursor.execute("SET FOREIGN_KEY_CHECKS=1")
         conn.commit()
@@ -137,12 +168,12 @@ def execute_sql(sql, deploy_target=None):
     return total_rows
 
 # ---------------------------------------------------------------------------
-# Image Push
+# Image Push (SSH/SCP)
 # ---------------------------------------------------------------------------
 
-def push_images(pending_images, upload_url=None):
-    """Download images from URLs and push to POS upload server."""
-    url = upload_url or UPLOAD_SERVER_URL
+def push_images_scp(pending_images, host, user=None):
+    """Download images from URLs and push to POS via SCP."""
+    user = user or SSH_USER
     pushed = 0
     failed = 0
 
@@ -153,25 +184,112 @@ def push_images(pending_images, upload_url=None):
             if not image_url or not dest_path:
                 continue
 
-            # Download image
+            # Download image to temp file
             r = requests.get(image_url, timeout=30)
             r.raise_for_status()
 
-            # Upload to POS
-            upload_resp = requests.post(
-                f"{url}/upload",
-                files={"file": (dest_path, r.content)},
-                data={"path": dest_path},
-                timeout=30,
+            with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(dest_path)[1]) as tmp:
+                tmp.write(r.content)
+                tmp_path = tmp.name
+
+            # Determine remote path — put in images root or a subfolder
+            remote_path = f"{POS_IMAGES_DIR}\\{dest_path}"
+            scp_dest = f"{user}@{host}:\"{remote_path}\""
+
+            result = subprocess.run(
+                ["scp", "-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=no",
+                 tmp_path, scp_dest],
+                capture_output=True, text=True, timeout=30,
             )
-            upload_resp.raise_for_status()
-            pushed += 1
-            print(f"  [IMG] Pushed: {dest_path}")
+
+            os.unlink(tmp_path)
+
+            if result.returncode == 0:
+                pushed += 1
+                print(f"  [IMG] SCP pushed: {dest_path}")
+            else:
+                failed += 1
+                print(f"  [IMG] SCP failed {dest_path}: {result.stderr.strip()}")
+
         except Exception as e:
             failed += 1
             print(f"  [IMG] Failed {img.get('name', '?')}: {e}")
 
     return pushed, failed
+
+# ---------------------------------------------------------------------------
+# POS Restart (SSH)
+# ---------------------------------------------------------------------------
+
+def pos_is_running(host, user=None):
+    """Check if POS process is running via SSH."""
+    ok, out, _ = ssh_cmd(host, 'tasklist /fi "imagename eq Pecan POS.exe" /fo csv /nh', user=user)
+    return ok and "Pecan POS.exe" in out
+
+
+def restart_pos(host, user=None, db_name=None):
+    """Restart the POS via SSH: taskkill → schtasks relaunch. Returns result dict."""
+    user = user or SSH_USER
+    result = {"method": "ssh", "pos_restarted": False, "pos_running": False}
+
+    if not ssh_available(host, user):
+        result["error"] = "SSH not available"
+        print(f"  [POS] SSH not available at {user}@{host}")
+        return result
+
+    # Optionally switch database in appsettings.json
+    if db_name:
+        appsettings = r"C:\Program Files\Pecan Solutions\Pecan POS\resources\api\appsettings.json"
+        ps_cmd = (
+            f"powershell -Command \"(Get-Content '{appsettings}') "
+            f"-replace 'Database=[^;\\\"]+', 'Database={db_name}' "
+            f"| Set-Content '{appsettings}'\""
+        )
+        ok, _, err = ssh_cmd(host, ps_cmd, user=user, timeout=15)
+        if ok:
+            print(f"  [POS] Updated appsettings.json → Database={db_name}")
+            result["db_switched"] = db_name
+        else:
+            print(f"  [POS] Failed to update appsettings: {err}")
+
+    # Kill POS
+    ok, out, err = ssh_cmd(host, 'taskkill /f /im "Pecan POS.exe"', user=user)
+    if ok:
+        print(f"  [POS] Killed POS process")
+    else:
+        print(f"  [POS] taskkill: {err or out}")
+
+    time.sleep(2)
+
+    # Create and run restart task
+    ok, _, err = ssh_cmd(
+        host,
+        f'schtasks /create /tn "PecanPOSRestart" /tr "{POS_EXE}" /sc once /st 00:00 /f',
+        user=user, timeout=10,
+    )
+    if not ok:
+        result["error"] = f"schtasks create failed: {err}"
+        print(f"  [POS] schtasks create failed: {err}")
+        return result
+
+    ok, _, err = ssh_cmd(host, 'schtasks /run /tn "PecanPOSRestart"', user=user)
+    if ok:
+        print(f"  [POS] Launched POS via scheduled task")
+        result["pos_restarted"] = True
+    else:
+        result["error"] = f"schtasks run failed: {err}"
+        print(f"  [POS] schtasks run failed: {err}")
+        return result
+
+    # Wait and verify
+    time.sleep(4)
+    result["pos_running"] = pos_is_running(host, user)
+    if result["pos_running"]:
+        print(f"  [POS] Verified running")
+    else:
+        print(f"  [POS] Warning: process not detected after restart")
+
+    return result
 
 # ---------------------------------------------------------------------------
 # Main loop
@@ -206,16 +324,33 @@ def process_queued():
             print(f"  [ERROR] Could not update status: {e}")
             continue
 
+        # Resolve SSH host from deploy target
+        target_host = (deploy_target or {}).get("host", DB_HOST)
+        ssh_host = (deploy_target or {}).get("ssh_host", SSH_HOST or target_host)
+        ssh_user = (deploy_target or {}).get("ssh_user", SSH_USER)
+        target_db = (deploy_target or {}).get("database", DB_NAME)
+
         try:
             # Execute SQL
             rows_affected = execute_sql(sql, deploy_target)
             print(f"  [SQL] {rows_affected} rows affected")
 
-            # Push images
+            # Push images via SCP
             images_pushed, images_failed = 0, 0
             if pending_images:
-                upload_url = (deploy_target or {}).get("upload_server_url", UPLOAD_SERVER_URL)
-                images_pushed, images_failed = push_images(pending_images, upload_url)
+                if ssh_available(ssh_host, ssh_user):
+                    images_pushed, images_failed = push_images_scp(
+                        pending_images, ssh_host, ssh_user,
+                    )
+                else:
+                    print(f"  [IMG] SSH not available — skipping image push")
+
+            # Restart POS
+            pos_result = {}
+            if ssh_available(ssh_host, ssh_user):
+                pos_result = restart_pos(ssh_host, ssh_user, db_name=target_db)
+            else:
+                print(f"  [POS] SSH not available — skipping POS restart")
 
             # Mark done
             result = {
@@ -225,6 +360,8 @@ def process_queued():
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "images_pushed": images_pushed,
                 "images_failed": images_failed,
+                "pos_restarted": pos_result.get("pos_restarted", False),
+                "pos_running": pos_result.get("pos_running", False),
             }
             supabase_patch("sessions", {"id": f"eq.{sid}"}, {
                 "deploy_status": "done",
@@ -243,6 +380,8 @@ def process_queued():
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "images_pushed": 0,
                 "images_failed": 0,
+                "pos_restarted": False,
+                "pos_running": False,
             }
             try:
                 supabase_patch("sessions", {"id": f"eq.{sid}"}, {
@@ -259,11 +398,19 @@ def main():
         print("ERROR: Set SUPABASE_URL and SUPABASE_KEY in .env")
         sys.exit(1)
 
+    ssh_host = SSH_HOST or DB_HOST
     print(f"Demo Builder Deploy Agent")
     print(f"  Supabase: {SUPABASE_URL}")
-    print(f"  Target:   {DB_HOST}:{DB_PORT}/{DB_NAME}")
-    print(f"  Upload:   {UPLOAD_SERVER_URL}")
+    print(f"  DB:       {DB_HOST}:{DB_PORT}/{DB_NAME}")
+    print(f"  SSH:      {SSH_USER}@{ssh_host}")
     print(f"  Polling every {POLL_INTERVAL}s\n")
+
+    # Check SSH on startup
+    if ssh_available(ssh_host):
+        print(f"  SSH: connected to {ssh_host}")
+    else:
+        print(f"  SSH: NOT available at {ssh_host} — image push and POS restart disabled")
+    print()
 
     while True:
         process_queued()

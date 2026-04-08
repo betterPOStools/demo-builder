@@ -91,10 +91,32 @@ export function DeployStatusCard() {
           )}
 
           {deployResult && deployStatus === "done" && (
-            <div className="mt-3 rounded bg-green-500/10 px-3 py-2 text-xs text-green-400">
-              {deployResult.rows_affected} rows affected.
-              {deployResult.images_pushed > 0 &&
-                ` ${deployResult.images_pushed} images pushed.`}
+            <div className="mt-3 space-y-1.5">
+              <div className="rounded bg-green-500/10 px-3 py-2 text-xs text-green-400">
+                {deployResult.rows_affected} rows affected.
+                {deployResult.images_pushed > 0 &&
+                  ` ${deployResult.images_pushed} images pushed.`}
+                {deployResult.images_failed > 0 &&
+                  ` ${deployResult.images_failed} images failed.`}
+              </div>
+              {deployResult.pos_restarted !== undefined && (
+                <div
+                  className={cn(
+                    "rounded px-3 py-2 text-xs",
+                    deployResult.pos_running
+                      ? "bg-green-500/10 text-green-400"
+                      : deployResult.pos_restarted
+                        ? "bg-amber-500/10 text-amber-400"
+                        : "bg-slate-500/10 text-slate-400",
+                  )}
+                >
+                  {deployResult.pos_running
+                    ? "POS restarted and running"
+                    : deployResult.pos_restarted
+                      ? "POS restarted — may need manual check"
+                      : "POS restart skipped (SSH not available)"}
+                </div>
+              )}
             </div>
           )}
 
