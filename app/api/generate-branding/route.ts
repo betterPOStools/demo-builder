@@ -80,10 +80,14 @@ Rules:
 
     // --- Unified: one seamless 1384×716 composition (sidebar + background joined) ---
     if (type === "unified") {
+      const titleCharLen = displayTitle?.length ?? 0;
+      const titleFontSize = titleCharLen > 14 ? 36 : titleCharLen > 10 ? 44 : 56;
+
       const titleInstruction = displayTitle
         ? `SIDEBAR TITLE: Render "${displayTitle}" as large display text in the left 360px zone.
 - Choose a Google Font that matches the cuisine/vibe and @import it
-- Font size 52–68px, bold or display weight
+- Font size: ${titleFontSize}px, bold or display weight — MUST fit on ONE LINE, no wrapping
+- Add white-space: nowrap and max-width: 340px; overflow: hidden to the title element
 - Position: lower-third or vertically centered
 - Add text-shadow (2–4px blur, dark) so it reads against any background
 - Color: white or a bright accent — must be legible`
@@ -152,10 +156,15 @@ STRUCTURE:
 
     // --- Sidebar ---
     if (type === "sidebar") {
+      const titleCharLen = displayTitle?.length ?? 0;
+      const titleFontSize = titleCharLen > 14 ? 36 : titleCharLen > 10 ? 44 : 56;
+
       const titleInstruction = displayTitle
         ? `TITLE TEXT: Render "${displayTitle}" in the sidebar.
 - @import the chosen Google Font and apply it to the title element
-- Font size 52–68px, bold or display weight
+- Font size: ${titleFontSize}px, bold or display weight — MUST fit on ONE LINE, no wrapping
+- Add white-space: nowrap to the title element so it never wraps
+- Width constraint: max-width: 340px; overflow: hidden on the title element
 - Position: lower-third (bottom 200px) or vertically centered — whichever suits the composition
 - text-shadow: 0 2px 8px rgba(0,0,0,0.6) for legibility
 - Color: white or a bright accent color that pops`
@@ -232,13 +241,25 @@ CSS CONSTRAINTS:
 
 DESIGN:
 - Root: <div class="bg-root"> — width:1024px; height:716px; overflow:hidden; position:relative
-- POS buttons, item images, and text sit on top of this. Decorative layers should stay below 20% opacity so the UI remains readable.
-- Dark base color — very dark variant of the cuisine accent color (not pure #0f172a every time — use a dark teal for seafood, dark charcoal-red for BBQ, dark espresso for Italian, etc.)
-- 5–7 child divs at varying low opacities
-- Large-scale composition — a few big shapes, not many small ones
-- Geometric: large circles, arcs, diagonal panels — all at low opacity
 - NO text of any kind
-- Inset box-shadow vignette on the root for depth`;
+- Inset box-shadow vignette on the root for depth
+
+BASE LAYER (full canvas):
+- A rich directional gradient anchored to the cuisine's signature colors — NOT pure black, NOT #0f172a
+- Examples: deep ocean teal (#0a2e38) → midnight navy (#0d1b2a) for seafood; charred mahogany (#1a0a08) → ember brown (#2d1206) for BBQ; espresso (#1a0f08) → dark rosewood (#2a0e1a) for Italian
+- The base itself should feel colored and atmospheric, not just dark grey or black
+
+MIDGROUND LAYERS (3–4 child divs, position:absolute):
+- Large bold shapes: oversized circles (400–700px diameter), diagonal panels via clip-path, sweeping arcs
+- Opacity 65–85% — rich and vivid, this is the visual centerpiece
+- Colors: vivid accent tones from the cuisine palette at full saturation
+- Vary position: bleed off corners and edges for a dynamic composition
+
+FOREGROUND ACCENT (1–2 child divs):
+- Small concentrated accent shapes or a subtle radial glow in one quadrant
+- Opacity 30–50% — adds depth and layering
+- Keep this side lighter so button labels remain readable`;
+
 
     const msg = await client.messages.create({
       model: "claude-sonnet-4-6",
