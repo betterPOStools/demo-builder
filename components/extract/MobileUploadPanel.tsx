@@ -60,7 +60,19 @@ export function MobileUploadPanel({ sessionId }: { sessionId: string }) {
 
   async function processFile(file: RemoteFile) {
     setProcessedUrls((prev) => new Set([...prev, file.url]));
-    await processUrl(file.url);
+    // Fetch the image blob and add it as a file (not a URL) so it goes through
+    // /api/extract (image vision) instead of /api/extract-url (HTML scraper)
+    try {
+      const blob = await fetch(file.url).then((r) => r.blob());
+      const ext = file.name.split(".").pop() ?? "jpg";
+      const imageFile = new File([blob], file.name, { type: blob.type || `image/${ext}` });
+      addFiles([imageFile]);
+      await new Promise((r) => setTimeout(r, 50));
+      await processFiles();
+    } catch {
+      // fallback: treat as URL
+      await processUrl(file.url);
+    }
   }
 
   async function processAll() {
