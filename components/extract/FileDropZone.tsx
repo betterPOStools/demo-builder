@@ -1,38 +1,23 @@
 "use client";
 
-import { useCallback, useState } from "react";
-import { Upload, Link as LinkIcon, Loader2 } from "lucide-react";
+import { useCallback, useRef, useState } from "react";
+import { Upload, Link as LinkIcon, Loader2, Camera } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { useStore } from "@/store";
 import { useExtraction } from "@/lib/extraction/useExtraction";
 
 const ACCEPTED_TYPES = [
-  ".pdf",
-  ".png",
-  ".jpg",
-  ".jpeg",
-  ".webp",
-  ".gif",
-  ".bmp",
-  ".tiff",
-  ".html",
-  ".mhtml",
-  ".mht",
-  ".htm",
-  ".docx",
-  ".pptx",
-  ".txt",
-  ".rtf",
-  ".json",
-  ".xlsx",
-  ".csv",
+  ".pdf", ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff",
+  ".html", ".mhtml", ".mht", ".htm", ".docx", ".pptx", ".txt", ".rtf",
+  ".json", ".xlsx", ".csv",
 ];
 
 export function FileDropZone() {
   const [isDragOver, setIsDragOver] = useState(false);
   const [urlInput, setUrlInput] = useState("");
   const [showUrlInput, setShowUrlInput] = useState(false);
+  const cameraRef = useRef<HTMLInputElement>(null);
   const addFiles = useStore((s) => s.addFiles);
   const isProcessing = useStore((s) => s.isProcessing);
   const { processUrl } = useExtraction();
@@ -59,10 +44,7 @@ export function FileDropZone() {
   return (
     <div className="space-y-3">
       <div
-        onDragOver={(e) => {
-          e.preventDefault();
-          setIsDragOver(true);
-        }}
+        onDragOver={(e) => { e.preventDefault(); setIsDragOver(true); }}
         onDragLeave={() => setIsDragOver(false)}
         onDrop={handleDrop}
         className={cn(
@@ -89,6 +71,26 @@ export function FileDropZone() {
       </div>
 
       <div className="flex items-center gap-2">
+        {/* Live camera capture — visible on tablets/touch devices */}
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => cameraRef.current?.click()}
+          className="gap-1.5 text-xs text-slate-400"
+        >
+          <Camera className="h-3.5 w-3.5" />
+          Take photo
+        </Button>
+        <input
+          ref={cameraRef}
+          type="file"
+          accept="image/*"
+          capture="environment"
+          multiple
+          onChange={handleFileInput}
+          className="hidden"
+        />
+
         <Button
           variant="ghost"
           size="sm"
@@ -114,17 +116,10 @@ export function FileDropZone() {
             disabled={!urlInput.trim() || isProcessing}
             onClick={() => {
               const url = urlInput.trim();
-              if (url) {
-                processUrl(url);
-                setUrlInput("");
-              }
+              if (url) { processUrl(url); setUrlInput(""); }
             }}
           >
-            {isProcessing ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              "Extract"
-            )}
+            {isProcessing ? <Loader2 className="h-4 w-4 animate-spin" /> : "Extract"}
           </Button>
         </div>
       )}

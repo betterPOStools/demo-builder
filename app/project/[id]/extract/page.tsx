@@ -8,6 +8,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { FileDropZone } from "@/components/extract/FileDropZone";
 import { FileQueue } from "@/components/extract/FileQueue";
 import { ResultsTable } from "@/components/extract/ResultsTable";
+import { MobileUploadPanel } from "@/components/extract/MobileUploadPanel";
 import { useStore } from "@/store";
 
 export default function ExtractPage({
@@ -46,6 +47,8 @@ export default function ExtractPage({
       </div>
 
       <FileDropZone />
+
+      <MobileUploadPanel sessionId={id} />
 
       {files.length > 0 && <FileQueue />}
 
