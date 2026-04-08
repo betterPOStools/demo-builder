@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import {
   File,
   Globe,
@@ -16,6 +17,7 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { useStore } from "@/store";
 import { useExtraction } from "@/lib/extraction/useExtraction";
+import { Lightbox, type LightboxImage } from "@/components/ui/Lightbox";
 import {
   DndContext,
   closestCenter,
@@ -41,44 +43,33 @@ function formatSize(bytes: number): string {
 
 const statusConfig = {
   pending: { icon: File, color: "text-slate-400", label: "Pending" },
-  processing: {
-    icon: Loader2,
-    color: "text-blue-400",
-    label: "Processing...",
-  },
+  processing: { icon: Loader2, color: "text-blue-400", label: "Processing..." },
   done: { icon: Check, color: "text-green-400", label: "Done" },
   error: { icon: AlertCircle, color: "text-red-400", label: "Error" },
 };
 
 function isImageType(type: string): boolean {
-  return (
-    type.startsWith("image/") ||
-    /\.(png|jpe?g|webp|gif|bmp|tiff)$/i.test(type)
-  );
+  return type.startsWith("image/") || /\.(png|jpe?g|webp|gif|bmp|tiff)$/i.test(type);
 }
 
 function isPdfType(type: string): boolean {
-  return type === "application/pdf" || type.endsWith(".pdf") || /\.pdf$/i.test(type);
+  return type === "application/pdf" || /\.pdf$/i.test(type);
 }
 
 function SortableFileRow({
   fileId,
   index,
+  onThumbnailClick,
 }: {
   fileId: string;
   index: number;
+  onThumbnailClick: (src: string, name: string) => void;
 }) {
   const file = useStore((s) => s.files.find((f) => f.id === fileId));
   const removeFile = useStore((s) => s.removeFile);
 
-  const {
-    attributes,
-    listeners,
-    setNodeRef,
-    transform,
-    transition,
-    isDragging,
-  } = useSortable({ id: fileId });
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
+    useSortable({ id: fileId });
 
   const style = {
     transform: CSS.Transform.toString(transform),
@@ -92,13 +83,10 @@ function SortableFileRow({
   const StatusIcon = config.icon;
   const showImage = isImageType(file.type);
   const showPdf = isPdfType(file.type);
+  const clickable = !!file.thumbnailUrl;
 
   return (
-    <div
-      ref={setNodeRef}
-      style={style}
-      className="flex items-center gap-2 px-3 py-2"
-    >
+    <div ref={setNodeRef} style={style} className="flex items-center gap-2 px-3 py-2">
       {/* Drag handle */}
       <button
         {...attributes}
@@ -113,14 +101,19 @@ function SortableFileRow({
         {index + 1}
       </span>
 
-      {/* Thumbnail */}
-      <div className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded border border-slate-700 bg-slate-900">
+      {/* Thumbnail — click to view full size */}
+      <div
+        className={cn(
+          "flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded border border-slate-700 bg-slate-900",
+          clickable && "cursor-pointer hover:border-blue-500/50 hover:brightness-110",
+        )}
+        onClick={() => {
+          if (file.thumbnailUrl) onThumbnailClick(file.thumbnailUrl, file.name);
+        }}
+        title={clickable ? "Click to view full size" : undefined}
+      >
         {file.thumbnailUrl ? (
-          <img
-            src={file.thumbnailUrl}
-            alt=""
-            className="h-full w-full object-cover"
-          />
+          <img src={file.thumbnailUrl} alt="" className="h-full w-full object-cover" />
         ) : showPdf ? (
           <FileTextIcon className="h-5 w-5 text-red-400" />
         ) : showImage ? (
@@ -153,13 +146,11 @@ function SortableFileRow({
         </div>
         <p className="text-xs text-slate-500">
           {file.type === "url" ? "Web page" : formatSize(file.size)}
-          {file.error && (
-            <span className="ml-2 text-red-400">{file.error}</span>
-          )}
+          {file.error && <span className="ml-2 text-red-400">{file.error}</span>}
         </p>
       </div>
 
-      {/* Remove button */}
+      {/* Remove */}
       <button
         onClick={() => removeFile(file.id)}
         className="shrink-0 rounded p-1 text-slate-500 hover:bg-slate-700 hover:text-slate-300"
@@ -176,11 +167,24 @@ export function FileQueue() {
   const isProcessing = useStore((s) => s.isProcessing);
   const { processFiles } = useExtraction();
 
+  const [lightbox, setLightbox] = useState<{ src: string; name: string } | null>(null);
+
+  // Build lightbox images from all files with thumbnails
+  const lightboxImages: LightboxImage[] = files
+    .filter((f) => f.thumbnailUrl)
+    .map((f) => ({ src: f.thumbnailUrl!, name: f.name }));
+
+  function openLightbox(src: string, name: string) {
+    setLightbox({ src, name });
+  }
+
+  const lightboxIdx = lightbox
+    ? lightboxImages.findIndex((i) => i.src === lightbox.src)
+    : -1;
+
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
-    useSensor(KeyboardSensor, {
-      coordinateGetter: sortableKeyboardCoordinates,
-    }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
 
   const pendingCount = files.filter((f) => f.status === "pending").length;
@@ -190,11 +194,9 @@ export function FileQueue() {
   function handleDragEnd(event: DragEndEvent) {
     const { active, over } = event;
     if (!over || active.id === over.id) return;
-
     const oldIndex = files.findIndex((f) => f.id === active.id);
     const newIndex = files.findIndex((f) => f.id === over.id);
     if (oldIndex === -1 || newIndex === -1) return;
-
     const newOrder = [...files.map((f) => f.id)];
     newOrder.splice(oldIndex, 1);
     newOrder.splice(newIndex, 0, active.id as string);
@@ -202,58 +204,52 @@ export function FileQueue() {
   }
 
   return (
-    <div className="rounded-lg border border-slate-700 bg-slate-800/30">
-      <div className="flex items-center justify-between border-b border-slate-700 px-4 py-2">
-        <div>
-          <span className="text-sm font-medium text-slate-300">
-            Files ({files.length})
-          </span>
-          <span className="ml-2 text-[10px] text-slate-600">
-            drag to reorder
-          </span>
+    <>
+      <div className="rounded-lg border border-slate-700 bg-slate-800/30">
+        <div className="flex items-center justify-between border-b border-slate-700 px-4 py-2">
+          <div>
+            <span className="text-sm font-medium text-slate-300">Files ({files.length})</span>
+            <span className="ml-2 text-[10px] text-slate-600">drag to reorder · click image to enlarge</span>
+          </div>
+          {isProcessing ? (
+            <div className="flex items-center gap-2 text-xs text-blue-400">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              Processing...
+            </div>
+          ) : (
+            pendingCount > 0 && (
+              <Button variant="ghost" size="sm" className="h-7 gap-1.5 text-xs" onClick={processFiles}>
+                <Play className="h-3 w-3" />
+                Process {pendingCount === files.length ? "All" : `${pendingCount} Pending`}
+              </Button>
+            )
+          )}
         </div>
-        {isProcessing ? (
-          <div className="flex items-center gap-2 text-xs text-blue-400">
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            Processing...
-          </div>
-        ) : (
-          pendingCount > 0 && (
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-7 gap-1.5 text-xs"
-              onClick={processFiles}
-            >
-              <Play className="h-3 w-3" />
-              Process{" "}
-              {pendingCount === files.length
-                ? "All"
-                : `${pendingCount} Pending`}
-            </Button>
-          )
-        )}
+
+        <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+          <SortableContext items={files.map((f) => f.id)} strategy={verticalListSortingStrategy}>
+            <div className="divide-y divide-slate-700/50">
+              {files.map((file, index) => (
+                <SortableFileRow
+                  key={file.id}
+                  fileId={file.id}
+                  index={index}
+                  onThumbnailClick={openLightbox}
+                />
+              ))}
+            </div>
+          </SortableContext>
+        </DndContext>
       </div>
-      <DndContext
-        sensors={sensors}
-        collisionDetection={closestCenter}
-        onDragEnd={handleDragEnd}
-      >
-        <SortableContext
-          items={files.map((f) => f.id)}
-          strategy={verticalListSortingStrategy}
-        >
-          <div className="divide-y divide-slate-700/50">
-            {files.map((file, index) => (
-              <SortableFileRow
-                key={file.id}
-                fileId={file.id}
-                index={index}
-              />
-            ))}
-          </div>
-        </SortableContext>
-      </DndContext>
-    </div>
+
+      {lightbox && lightboxIdx >= 0 && (
+        <Lightbox
+          images={lightboxImages}
+          index={lightboxIdx}
+          onClose={() => setLightbox(null)}
+          onNavigate={(i) => setLightbox({ src: lightboxImages[i].src, name: lightboxImages[i].name ?? "" })}
+        />
+      )}
+    </>
   );
 }

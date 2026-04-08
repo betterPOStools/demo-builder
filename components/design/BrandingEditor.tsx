@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { Lightbox, type LightboxImage } from "@/components/ui/Lightbox";
 import {
   Palette,
   Sparkles,
@@ -95,6 +96,8 @@ export function BrandingEditor() {
   const [genProgress, setGenProgress] = useState("");
   const [preview, setPreview] = useState<BrandingPreview | null>(null);
   const [showLibrary, setShowLibrary] = useState(false);
+  const [lightbox, setLightbox] = useState<LightboxImage[] | null>(null);
+  const [lightboxIdx, setLightboxIdx] = useState(0);
 
   const bg = branding.background || "#0f172a";
   const btnBg = branding.buttons_background_color;
@@ -390,7 +393,11 @@ export function BrandingEditor() {
               <Label className="text-xs">Sidebar Picture</Label>
               {branding.sidebar_picture ? (
                 <div className="flex items-center gap-2">
-                  <div className="h-12 w-6 overflow-hidden rounded border border-slate-700">
+                  <div
+                    className="h-12 w-6 cursor-pointer overflow-hidden rounded border border-slate-700 hover:border-blue-500/50"
+                    onClick={() => { setLightbox([{ src: branding.sidebar_picture!, name: "Sidebar" }]); setLightboxIdx(0); }}
+                    title="Click to view full size"
+                  >
                     <img src={branding.sidebar_picture} alt="" className="h-full w-full object-cover" />
                   </div>
                   <span className="flex-1 truncate text-[10px] text-slate-500">
@@ -410,7 +417,11 @@ export function BrandingEditor() {
               <Label className="text-xs">Background Image</Label>
               {branding.background_picture ? (
                 <div className="flex items-center gap-2">
-                  <div className="h-8 w-14 overflow-hidden rounded border border-slate-700">
+                  <div
+                    className="h-8 w-14 cursor-pointer overflow-hidden rounded border border-slate-700 hover:border-blue-500/50"
+                    onClick={() => { setLightbox([{ src: branding.background_picture!, name: "Background" }]); setLightboxIdx(0); }}
+                    title="Click to view full size"
+                  >
                     <img src={branding.background_picture} alt="" className="h-full w-full object-cover" />
                   </div>
                   <span className="flex-1 truncate text-[10px] text-slate-500">
@@ -443,14 +454,18 @@ export function BrandingEditor() {
                     <div className="space-y-1.5">
                       <Label className="text-[10px] text-slate-500">Sidebars ({sidebarImages.length})</Label>
                       <div className="flex flex-wrap gap-2">
-                        {sidebarImages.map((img) => (
+                        {sidebarImages.map((img, i) => (
                           <div key={img.id} className="group relative overflow-hidden rounded border border-slate-700 hover:border-blue-500/50">
                             <img
                               src={img.dataUri}
                               alt=""
                               className="h-20 w-auto cursor-pointer"
                               onClick={() => useLibraryImage(img.dataUri, "sidebar")}
-                              title="Click to use"
+                              title="Click to use · right-click to view"
+                              onDoubleClick={() => {
+                                setLightbox(sidebarImages.map((s) => ({ src: s.dataUri, name: "Sidebar" })));
+                                setLightboxIdx(i);
+                              }}
                             />
                             <button
                               onClick={() => deleteGeneratedImage(img.id)}
@@ -467,14 +482,18 @@ export function BrandingEditor() {
                     <div className="space-y-1.5">
                       <Label className="text-[10px] text-slate-500">Backgrounds ({backgroundImages.length})</Label>
                       <div className="flex flex-wrap gap-2">
-                        {backgroundImages.map((img) => (
+                        {backgroundImages.map((img, i) => (
                           <div key={img.id} className="group relative overflow-hidden rounded border border-slate-700 hover:border-purple-500/50">
                             <img
                               src={img.dataUri}
                               alt=""
                               className="h-16 w-auto cursor-pointer"
                               onClick={() => useLibraryImage(img.dataUri, "background")}
-                              title="Click to use"
+                              title="Click to use · double-click to view"
+                              onDoubleClick={() => {
+                                setLightbox(backgroundImages.map((b) => ({ src: b.dataUri, name: "Background" })));
+                                setLightboxIdx(i);
+                              }}
                             />
                             <button
                               onClick={() => deleteGeneratedImage(img.id)}
@@ -544,6 +563,15 @@ export function BrandingEditor() {
           </div>
         </CardContent>
       </Card>
+
+      {lightbox && (
+        <Lightbox
+          images={lightbox}
+          index={lightboxIdx}
+          onClose={() => setLightbox(null)}
+          onNavigate={setLightboxIdx}
+        />
+      )}
     </div>
   );
 }

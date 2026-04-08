@@ -1,5 +1,6 @@
 // POST /api/upload/:id — receive a file from mobile and store in Supabase Storage
-// Returns the public URL for the uploaded file.
+// GET  /api/upload/:id — list files stored for this session
+// DELETE /api/upload/:id?path=... — delete a stored file
 
 import { createServerClient } from "@/lib/supabase/server";
 
@@ -84,6 +85,38 @@ export async function GET(
     });
 
     return Response.json({ files });
+  } catch (error: unknown) {
+    return Response.json({ error: (error as Error).message }, { status: 500 });
+  }
+}
+
+// DELETE /api/upload/:id?path=filename — remove a stored file
+export async function DELETE(
+  request: Request,
+  { params }: { params: Promise<{ id: string }> },
+) {
+  try {
+    const { id: sessionId } = await params;
+    const url = new URL(request.url);
+    const filename = url.searchParams.get("path");
+    if (!filename) {
+      return Response.json({ error: "Missing path param" }, { status: 400 });
+    }
+
+    const storageSupa = (await import("@supabase/supabase-js")).createClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.SUPABASE_SERVICE_ROLE_KEY!,
+    );
+
+    const { error } = await storageSupa.storage
+      .from(BUCKET)
+      .remove([`${sessionId}/${filename}`]);
+
+    if (error) {
+      return Response.json({ error: error.message }, { status: 500 });
+    }
+
+    return Response.json({ ok: true });
   } catch (error: unknown) {
     return Response.json({ error: (error as Error).message }, { status: 500 });
   }
