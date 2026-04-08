@@ -137,7 +137,7 @@ export function BrandingEditor() {
         }).then(async (r) => {
           if (!r.ok) throw new Error("sidebar failed");
           const d = await r.json();
-          const png = await htmlToPng(d.html, 70, 600);
+          const png = await htmlToPng(d.html, 360, 696);
           addGeneratedImage({
             id: generateId(),
             type: "sidebar",
@@ -154,7 +154,7 @@ export function BrandingEditor() {
         }).then(async (r) => {
           if (!r.ok) throw new Error("background failed");
           const d = await r.json();
-          const png = await htmlToPng(d.html, 800, 600);
+          const png = await htmlToPng(d.html, 1024, 716);
           addGeneratedImage({
             id: generateId(),
             type: "background",

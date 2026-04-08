@@ -79,7 +79,7 @@ Rules:
 
 ${context}
 
-CANVAS: exactly 70px wide × 600px tall. Will be rasterized to PNG by html2canvas.
+CANVAS: exactly 360px wide × 696px tall. Will be rasterized to PNG by html2canvas.
 
 OUTPUT FORMAT — return a JSON object with two keys:
 {
@@ -95,7 +95,7 @@ CSS RULES (html2canvas constraints):
 - CSS variables (--var) work
 
 DESIGN REQUIREMENTS:
-- Root element: .sb-root { width:70px; height:600px; overflow:hidden; position:relative; }
+- Root element: .sb-root { width:360px; height:696px; overflow:hidden; position:relative; }
 - Dark, rich base — deep navy (#0f172a), charcoal (#1a1a2e), dark burgundy, espresso, etc.
 - Build DEPTH with 4–8 layered elements: gradient fills, soft glows, geometric shapes, diagonal cuts
 - Accent colors should reflect the cuisine vibe (warm amber for Italian, deep red for steakhouse, teal for seafood, etc.)
@@ -116,7 +116,7 @@ Return ONLY the JSON object, no markdown fences, no explanation.`
 
 ${context}
 
-CANVAS: exactly 800px wide × 600px tall. Will be rasterized to PNG by html2canvas.
+CANVAS: exactly 1024px wide × 716px tall. Will be rasterized to PNG by html2canvas.
 
 OUTPUT FORMAT — return a JSON object with two keys:
 {
@@ -132,7 +132,7 @@ CSS RULES (html2canvas constraints):
 - CSS variables (--var) work
 
 DESIGN REQUIREMENTS:
-- Root element: .bg-root { width:800px; height:600px; overflow:hidden; position:relative; }
+- Root element: .bg-root { width:1024px; height:716px; overflow:hidden; position:relative; }
 - VERY SUBTLE overall — POS menu buttons and text will sit on top. Decorative elements max 8–12% opacity.
 - Dark base: #0f172a, #0d1117, #111827, or a dark tinted version appropriate to the cuisine
 - Build richness with 6–10 layered elements at varying low opacities

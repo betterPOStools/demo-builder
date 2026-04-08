@@ -1,7 +1,7 @@
 /**
  * Render an HTML string to a PNG data URI using html2canvas.
- * Supports <style> tags in the HTML — they are hoisted into a scoped <style>
- * injected into document.head so html2canvas can read computed styles.
+ * Supports <style> tags inline in the HTML — browsers process style elements
+ * anywhere in the document, and html2canvas reads computed styles correctly.
  * Runs client-side only.
  */
 export async function htmlToPng(
@@ -10,22 +10,6 @@ export async function htmlToPng(
   height: number,
 ): Promise<string> {
   const html2canvas = (await import("html2canvas")).default;
-
-  // Extract any <style> blocks from the HTML so we can hoist them
-  const styleBlocks: string[] = [];
-  const bodyHtml = html.replace(/<style>([\s\S]*?)<\/style>/gi, (_, css) => {
-    styleBlocks.push(css);
-    return "";
-  });
-
-  // Inject extracted CSS into document head with a unique scope marker
-  let styleEl: HTMLStyleElement | null = null;
-  if (styleBlocks.length > 0) {
-    styleEl = document.createElement("style");
-    styleEl.setAttribute("data-htmltopng", "1");
-    styleEl.textContent = styleBlocks.join("\n");
-    document.head.appendChild(styleEl);
-  }
 
   const container = document.createElement("div");
   container.style.cssText = `
@@ -37,8 +21,11 @@ export async function htmlToPng(
     overflow: hidden;
     pointer-events: none;
   `;
-  container.innerHTML = bodyHtml;
+  container.innerHTML = html;
   document.body.appendChild(container);
+
+  // Give the browser one frame to apply styles from any injected <style> tags
+  await new Promise<void>((r) => requestAnimationFrame(() => r()));
 
   try {
     const canvas = await html2canvas(container, {
@@ -52,6 +39,5 @@ export async function htmlToPng(
     return canvas.toDataURL("image/png");
   } finally {
     document.body.removeChild(container);
-    if (styleEl) document.head.removeChild(styleEl);
   }
 }
