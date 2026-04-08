@@ -124,7 +124,7 @@ DESIGN:
 - Root: <div class="u-root"> — width:1384px; height:716px; overflow:hidden; position:relative
 - Derive colors boldly from the restaurant type — saturated, vivid, brand-appropriate
 - LEFT 360px: rich, saturated showcase zone. Large shapes at 100% opacity. This is the visual centerpiece.
-- RIGHT 1024px: same color family, fully opaque (100% opacity). The display software applies its own fixed dimming to this zone at runtime — so generate it as bright and vivid as possible. Do NOT pre-darken it.
+- RIGHT 1024px: same color family, fully opaque (100% opacity). What you generate is exactly what renders — no additional dimming is applied at runtime.
 - The seam at x=360 must be INVISIBLE — use gradients that flow naturally across it
 - A base gradient spanning the full 1384px anchors the composition
 
