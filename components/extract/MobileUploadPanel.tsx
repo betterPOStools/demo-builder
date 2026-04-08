@@ -19,7 +19,7 @@ export function MobileUploadPanel({ sessionId }: { sessionId: string }) {
   const [remoteFiles, setRemoteFiles] = useState<RemoteFile[]>([]);
   const [processedUrls, setProcessedUrls] = useState<Set<string>>(new Set());
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const { processUrl } = useExtraction();
+  const { processUrl, processFiles } = useExtraction();
   const addFiles = useStore((s) => s.addFiles);
 
   // Use configured network URL if available (avoids QR pointing to localhost).

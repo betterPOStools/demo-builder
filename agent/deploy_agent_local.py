@@ -26,6 +26,7 @@ Environment variables (in .env next to this file):
 
 import base64
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -35,6 +36,31 @@ from datetime import datetime, timezone
 
 import mysql.connector
 import requests
+
+# ---------------------------------------------------------------------------
+# Logging — always write to agent.log next to this script, regardless of how
+# the process was launched (WMI, PsExec, schtasks — stdout redirect unreliable)
+# ---------------------------------------------------------------------------
+LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent.log")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(message)s",
+    handlers=[
+        logging.FileHandler(LOG_PATH, encoding="utf-8"),
+        logging.StreamHandler(sys.stdout),
+    ],
+)
+log = logging.info
+log_err = logging.error
+
+# Monkey-patch print so existing print() calls also go to the log
+import builtins as _builtins
+_orig_print = _builtins.print
+def _log_print(*args, **kwargs):
+    kwargs.pop("file", None)
+    _orig_print(*args, **kwargs)
+    logging.info(" ".join(str(a) for a in args))
+_builtins.print = _log_print
 
 # ---------------------------------------------------------------------------
 # Config
