@@ -1,24 +1,22 @@
 import { createServerClient } from "@/lib/supabase/server";
 
-// POST /api/connections/test — test a saved connection by ID or inline params
+// POST /api/connections/test
+// Checks agent reachability via Supabase heartbeat instead of direct TCP.
+// Vercel runs in AWS and can never reach Tailscale IPs directly — TCP probes
+// always fail. Instead the agent updates agent_last_seen every poll cycle.
 export async function POST(request: Request) {
   try {
     const body = (await request.json()) as {
       connectionId?: string;
       host?: string;
-      port?: number;
-      database?: string;
-      user?: string;
-      password?: string;
     };
 
-    let host: string, port: number, database: string, user: string, password: string;
+    const supabase = createServerClient();
 
     if (body.connectionId) {
-      const supabase = createServerClient();
       const { data, error } = await supabase
         .from("connections")
-        .select("host, port, database_name, username, password_encrypted")
+        .select("host, agent_last_seen")
         .eq("id", body.connectionId)
         .single();
 
@@ -26,71 +24,42 @@ export async function POST(request: Request) {
         return Response.json({ ok: false, error: "Connection not found" }, { status: 404 });
       }
 
-      host = data.host;
-      port = data.port;
-      database = data.database_name;
-      user = data.username;
-      password = data.password_encrypted || "123456";
-    } else {
-      host = body.host || "100.112.68.19";
-      port = body.port || 3306;
-      database = body.database || "pecandemodb";
-      user = body.user || "root";
-      password = body.password || "123456";
+      if (data.agent_last_seen) {
+        const ageMs = Date.now() - new Date(data.agent_last_seen).getTime();
+        const ageSec = Math.round(ageMs / 1000);
+        if (ageMs < 30_000) {
+          return Response.json({ ok: true, host: data.host, method: "heartbeat", ageSec });
+        }
+        return Response.json({
+          ok: false, host: data.host, method: "heartbeat", ageSec,
+          error: `Agent last seen ${ageSec}s ago — may be offline`,
+        });
+      }
     }
 
-    // Test via TCP socket connection attempt
-    // We can't import mysql2 in edge, so we'll test with a simple TCP probe
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5000);
+    // No heartbeat yet — use last successful deploy as a proxy signal
+    const { data: recent } = await supabase
+      .from("sessions")
+      .select("updated_at")
+      .eq("deploy_status", "done")
+      .order("updated_at", { ascending: false })
+      .limit(1);
 
-    try {
-      // Use the deploy agent's Supabase status as a proxy,
-      // or do a simple fetch to the agent health endpoint.
-      // For now, do a DNS+TCP check by connecting to the MariaDB port.
-      const net = await import("net");
-      const result = await new Promise<{ ok: boolean; latency: number; error?: string }>((resolve) => {
-        const start = Date.now();
-        const socket = new net.Socket();
-        socket.setTimeout(5000);
-
-        socket.connect(port, host, () => {
-          const latency = Date.now() - start;
-          socket.destroy();
-          resolve({ ok: true, latency });
-        });
-
-        socket.on("error", (err: Error) => {
-          socket.destroy();
-          resolve({ ok: false, latency: Date.now() - start, error: err.message });
-        });
-
-        socket.on("timeout", () => {
-          socket.destroy();
-          resolve({ ok: false, latency: Date.now() - start, error: "Connection timeout" });
-        });
-      });
-
-      clearTimeout(timeout);
-
+    if (recent && recent.length > 0) {
+      const ageMin = Math.round((Date.now() - new Date(recent[0].updated_at).getTime()) / 60_000);
       return Response.json({
-        ok: result.ok,
-        host,
-        port,
-        database,
-        latency: result.latency,
-        error: result.error || null,
-      });
-    } catch (err) {
-      clearTimeout(timeout);
-      return Response.json({
-        ok: false,
-        host,
-        port,
-        database,
-        error: (err as Error).message,
+        ok: true,
+        host: body.host || "",
+        method: "last_deploy",
+        note: `Last successful deploy ${ageMin}m ago`,
       });
     }
+
+    return Response.json({
+      ok: false,
+      host: body.host || "",
+      error: "No heartbeat data. Make sure the agent is running on the tablet.",
+    });
   } catch (error: unknown) {
     return Response.json({ ok: false, error: (error as Error).message }, { status: 500 });
   }

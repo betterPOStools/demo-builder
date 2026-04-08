@@ -112,10 +112,20 @@ def supabase_get(table, params=None):
     r.raise_for_status()
     return r.json()
 
-def supabase_patch(table, match, data):
+def supabase_patch(table, match, data, retries=5, backoff=4):
     url = f"{SUPABASE_URL}/rest/v1/{table}"
-    r = requests.patch(url, headers=HEADERS, params=match, json=data, timeout=10)
-    r.raise_for_status()
+    for attempt in range(retries):
+        try:
+            r = requests.patch(url, headers=HEADERS, params=match, json=data, timeout=15)
+            r.raise_for_status()
+            return
+        except Exception as e:
+            if attempt < retries - 1:
+                wait = backoff * (attempt + 1)
+                print(f"  [WARN] Supabase patch failed (attempt {attempt+1}/{retries}), retrying in {wait}s: {e}")
+                time.sleep(wait)
+            else:
+                raise
 
 # ---------------------------------------------------------------------------
 # SQL Execution
@@ -305,7 +315,25 @@ def restart_pos_local(db_name=None):
 # Main loop
 # ---------------------------------------------------------------------------
 
+def heartbeat():
+    """Update agent_last_seen on the active connection row so the UI can detect us."""
+    try:
+        rows = supabase_get("connections", {"select": "id", "limit": "1"})
+        if rows:
+            conn_id = rows[0]["id"]
+            supabase_patch(
+                "connections",
+                {"id": f"eq.{conn_id}"},
+                {"agent_last_seen": datetime.now(timezone.utc).isoformat()},
+                retries=1,
+                backoff=2,
+            )
+    except Exception:
+        pass  # heartbeat failure is non-fatal
+
+
 def process_queued():
+    heartbeat()
     try:
         rows = supabase_get("sessions", {
             "deploy_status": "eq.queued",
