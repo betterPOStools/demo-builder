@@ -31,7 +31,7 @@ export function QuickStartDialog() {
     const projectId = generateId();
     const cloned = cloneBundle(bundle);
 
-    // Load into store
+    // Load into store — set sessionHydrated so layout skips the empty Supabase fetch
     useStore.setState({
       groups: cloned.groups,
       items: cloned.items,
@@ -41,6 +41,7 @@ export function QuickStartDialog() {
       designOrigin: { type: "fresh" },
       isDirty: true,
       currentStep: 2,
+      sessionHydrated: true,
     });
 
     // Create session in Supabase
