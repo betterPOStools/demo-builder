@@ -6,9 +6,9 @@ export async function GET() {
     const supabase = createServerClient();
     const { data, error } = await supabase
       .from("sessions")
-      .select("id, name, restaurant_name, current_step, updated_at, created_at")
+      .select("id, name, restaurant_name, current_step, deploy_status, updated_at, created_at")
       .order("updated_at", { ascending: false })
-      .limit(20);
+      .limit(200);
 
     if (error) {
       return Response.json({ error: error.message }, { status: 500 });

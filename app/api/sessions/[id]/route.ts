@@ -30,6 +30,27 @@ export async function GET(
   }
 }
 
+// DELETE /api/sessions/:id — delete a session
+export async function DELETE(
+  _request: Request,
+  { params }: { params: Promise<{ id: string }> },
+) {
+  try {
+    const { id } = await params;
+    const supabase = createServerClient();
+    const { error } = await supabase.from("sessions").delete().eq("id", id);
+    if (error) {
+      return Response.json({ error: error.message }, { status: 500 });
+    }
+    return Response.json({ ok: true });
+  } catch (error: unknown) {
+    return Response.json(
+      { error: (error as Error).message },
+      { status: 500 },
+    );
+  }
+}
+
 // PUT /api/sessions/:id — save session state
 export async function PUT(
   request: Request,
