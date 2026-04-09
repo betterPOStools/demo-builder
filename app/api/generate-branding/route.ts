@@ -120,19 +120,28 @@ CSS CONSTRAINTS:
 - Use child divs for all layers
 - Gradients, box-shadow, border-radius, clip-path, transform, opacity all work
 
+AESTHETIC DIRECTION:
+Clean, minimal, professional — cinematic depth-of-field background. Soft, ambient, diffused lighting.
+No sharp focal subjects. No clutter. Premium design aesthetic.
+
+COMPOSITION:
+- LEFT 360px (sidebar): richer color story — soft color blooms, gentle depth, more saturated palette
+- RIGHT 1024px (POS main area): darker, low-contrast, uncluttered CENTER — POS buttons live here.
+  Color interest stays at the right edge, fading toward the center.
+- Seam at x=360 must be INVISIBLE — gradients flow naturally across it
+
+TECHNIQUE — simulate soft depth-of-field with stacked radial gradients:
+- Base: full-width atmospheric directional gradient from the cuisine's signature colors
+- Color blooms: large oversized radial gradients (400–800px) at corners and edges, 30–60% opacity
+  Concentrate bold blooms in the LEFT zone; echo them softly at the right edge
+- Center of RIGHT zone: subtle dark radial overlay to keep it low-contrast for UI readability
+- Vignette: inset box-shadow on root for cinematic framing
+
 DESIGN:
 - Root: <div class="u-root"> — width:1384px; height:716px; overflow:hidden; position:relative
-- Derive colors boldly from the restaurant type — saturated, vivid, brand-appropriate
-- LEFT 360px: rich, saturated showcase zone. Large shapes at 100% opacity. This is the visual centerpiece.
-- RIGHT 1024px: same color family, fully opaque (100% opacity). What you generate is exactly what renders — no additional dimming is applied at runtime.
-- The seam at x=360 must be INVISIBLE — use gradients that flow naturally across it
-- A base gradient spanning the full 1384px anchors the composition
-
-STRUCTURE:
-1. Full-width base gradient (the foundation)
-2. 2–4 bold decorative shapes concentrated in the LEFT zone (circles, diagonal panels, arcs)
-3. 1–2 very-low-opacity echo shapes extending into the RIGHT zone for continuity
-4. Inset vignette on the right side to keep it dark for POS UI`;
+- NO hard clip-path polygon shapes; use radial gradients and border-radius:50% blobs only
+- 6–10 child divs: base gradient + color bloom divs + center-clear overlay + vignette
+- What you generate is exactly what renders — no additional dimming applied at runtime
 
       const msg = await client.messages.create({
         model: "claude-sonnet-4-6",
@@ -227,7 +236,7 @@ DESIGN:
     }
 
     // --- Background ---
-    const backgroundPrompt = `You are an expert CSS visual designer. Create a richly layered background for a restaurant POS terminal's main screen.
+    const backgroundPrompt = `You are an expert CSS visual designer. Create a soft, cinematic background for a restaurant POS terminal's main screen.
 
 ${context}
 
@@ -237,28 +246,35 @@ OUTPUT: Return a <style> block followed immediately by a single root <div>. No J
 
 CSS CONSTRAINTS:
 - NO ::before / ::after — html2canvas limitation
-- Gradients, box-shadow, border-radius, clip-path, transform, opacity all work
+- NO clip-path polygons with sharp edges
+- Radial gradients, box-shadow, border-radius, opacity all work
+
+AESTHETIC DIRECTION:
+Clean, minimal, professional — visually appealing but never competing with the POS UI that sits on top.
+Think: premium hotel lobby, upscale restaurant ambiance, cinematic depth-of-field background photo.
+Soft, ambient, diffused lighting. Gentle gradients. No sharp focal subject. No clutter.
+
+COMPOSITION (critical — POS menu buttons and item cards overlay the center):
+- CENTER: Dark, low-contrast, uncluttered. Muted tones so UI text is readable. No shapes here.
+- EDGES & CORNERS: Slightly richer with soft color blooms, gentle depth — visual interest lives at the periphery.
+- OVERALL: A soft radial vignette that darkens the center slightly while edges carry the color story.
+
+TECHNIQUE — simulate shallow depth-of-field using stacked radial gradients:
+- Base: a rich atmospheric directional gradient across the full canvas anchored to the cuisine's color identity
+  Examples: deep ocean teal → midnight navy for seafood; charred mahogany → ember brown for BBQ;
+  espresso → dark rosewood for Italian; desert sand → deep terracotta for Mexican
+- Color blooms: 3–5 large oversized radial gradients (500–900px) positioned at corners and edges,
+  NOT in the center. Use the cuisine's signature accent colors at 30–60% opacity — soft and diffused.
+- Center clearing: a subtle dark radial gradient (transparent center → slight darkening) over the middle
+  to keep it clean and low-contrast for UI readability.
+- Depth vignette: inset box-shadow on root (rgba(0,0,0,0.45), 80–120px blur) for cinematic framing.
 
 DESIGN:
 - Root: <div class="bg-root"> — width:1024px; height:716px; overflow:hidden; position:relative
-- NO text of any kind
-- Inset box-shadow vignette on the root for depth
-
-BASE LAYER (full canvas):
-- A rich directional gradient anchored to the cuisine's signature colors — NOT pure black, NOT #0f172a
-- Examples: deep ocean teal (#0a2e38) → midnight navy (#0d1b2a) for seafood; charred mahogany (#1a0a08) → ember brown (#2d1206) for BBQ; espresso (#1a0f08) → dark rosewood (#2a0e1a) for Italian
-- The base itself should feel colored and atmospheric, not just dark grey or black
-
-MIDGROUND LAYERS (3–4 child divs, position:absolute):
-- Large bold shapes: oversized circles (400–700px diameter), diagonal panels via clip-path, sweeping arcs
-- Opacity 100% — fully opaque, maximum visual impact. The display software handles dimming separately.
-- Colors: vivid accent tones from the cuisine palette at full saturation
-- Vary position: bleed off corners and edges for a dynamic composition
-
-FOREGROUND ACCENT (1–2 child divs):
-- Small concentrated accent shapes or a radial glow in one quadrant
-- Opacity 100% — fully opaque
-- Use a slightly lighter or contrasting accent color for depth`;
+- NO text of any kind, no logos, no geometric hard shapes in center
+- 5–8 child divs total: base gradient div + color bloom divs + center-clear div + vignette
+- Each bloom div: position:absolute; border-radius:50%; background: radial-gradient(...)
+- The result should feel like a blurred, atmospheric photo — soft, premium, inviting`;
 
 
     const msg = await client.messages.create({
