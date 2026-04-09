@@ -756,31 +756,41 @@ export function BrandingEditor() {
                 <div className="h-2 w-2 rounded-full bg-green-500" />
                 <span className="ml-1.5 text-[9px] text-slate-600">POS Main Screen</span>
               </div>
+              {/* 35% scale: 1024×716 → ~358×251px. Sidebar: 360×696 → ~126×244px, 3px inset */}
               <div
-                className="relative flex h-48 items-center justify-center"
+                className="relative overflow-hidden"
                 style={{
+                  width: "100%",
+                  maxWidth: 358,
+                  aspectRatio: "1024 / 716",
                   backgroundColor: bg,
                   backgroundImage: branding.background_picture ? `url(${branding.background_picture})` : undefined,
                   backgroundSize: "cover",
                   backgroundPosition: "center",
                 }}
               >
-                {branding.sidebar_picture ? (
-                  <div className="absolute left-0 top-0 h-full w-10 bg-[#0a0f1a]">
-                    <img src={branding.sidebar_picture} alt="" className="h-full w-full object-cover opacity-80" />
-                  </div>
-                ) : (
-                  <div className="absolute left-0 top-0 h-full w-10 bg-[#0a0f1a]/60" />
-                )}
-                <div className="flex flex-wrap justify-center gap-2 pl-8">
+                {/* Sidebar — 360/1024 wide, 696/716 tall, 3px from edges */}
+                <div
+                  className="absolute bg-[#0a0f1a]"
+                  style={{ left: 3, top: 3, width: "35.16%", height: "97.2%" }}
+                >
+                  {branding.sidebar_picture ? (
+                    <img src={branding.sidebar_picture} alt="" className="h-full w-full object-cover" />
+                  ) : null}
+                </div>
+                {/* Button area — to the right of sidebar */}
+                <div
+                  className="absolute top-0 h-full flex flex-wrap content-center justify-center gap-1 p-2"
+                  style={{ left: "38%", right: 0 }}
+                >
                   {PREVIEW_SERVICES.map((s) => {
-                    const bg = btnBg || s.fallback;
-                    const fg = btnFg || (isLightColor(bg) ? "#1e293b" : "#ffffff");
+                    const btnColor = btnBg || s.fallback;
+                    const fg = btnFg || (isLightColor(btnColor) ? "#1e293b" : "#ffffff");
                     return (
                       <div
                         key={s.label}
-                        className="flex h-14 w-20 items-center justify-center rounded-lg text-[9px] font-bold shadow-md"
-                        style={{ backgroundColor: bg, color: fg }}
+                        className="flex items-center justify-center rounded text-[6px] font-bold"
+                        style={{ backgroundColor: btnColor, color: fg, width: "27%", height: "20%" }}
                       >
                         {s.label}
                       </div>
