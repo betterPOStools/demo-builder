@@ -75,7 +75,11 @@ const TOKEN_SCHEMA = `{
   "composition_style": [1-2 descriptors, e.g. "layered depth", "clean minimal"],
   "textureWords": [2-4 short physical material descriptors that could be surfaces — e.g. "weathered cedar", "rough-cast plaster", "woven linen", "river stone"],
   "lightingDescription": string (one sentence describing light quality and direction — e.g. "Late afternoon sun raking at a low angle across rough surfaces, casting long warm shadows"),
-  "dominantAtmosphere": exactly one of: "warm" | "cool" | "neutral" | "dramatic" | "soft"
+  "dominantAtmosphere": exactly one of: "warm" | "cool" | "neutral" | "dramatic" | "soft",
+  "flux_scene_prompt": string — a single richly detailed scene description for FLUX Pro. Cinematic photography language. Include: physical setting with specific materials and surfaces, lighting quality/direction/color temperature, atmosphere and mood in sensory terms, camera/composition feel. End with: "no text, no UI elements, atmospheric only". Example: "Tight overhead shot of sizzling carne asada on a blackened cast iron comal, amber kitchen spotlight cutting through rising smoke, dark rough-hewn wood beneath, shallow depth of field, warm crimson shadows, no text, atmospheric only",
+  "flux_sidebar_prompt": string — same format as flux_scene_prompt but composed for a narrow vertical surface. Same physical world as flux_scene_prompt — same light source, same materials — but framed as a vertical architectural detail rather than a hero food shot. Example: "Vertical close-up of weathered mesquite wood planking with dried chili ristras casting long shadows, amber sidelight from off-frame, dark moody background, no text, portrait orientation",
+  "ideogram_sidebar_prompt": string — written for Ideogram V3 when rendering a branded sidebar with quote text. Format: "[typography style] text reading '[QUOTE_PLACEHOLDER]' on [surface description], [lighting], [mood]". Use QUOTE_PLACEHOLDER literally — the actual quote will be injected at generation time. Example: "Elegant hand-lettered serif text reading '[QUOTE_PLACEHOLDER]' on dark weathered wood with warm amber candlelight, moody Mexican cantina atmosphere, high contrast legible typography",
+  "negative_prompt": string — what to explicitly avoid, written as a Stable Diffusion negative prompt string. Should capture what would look wrong for this specific brand. Example: "geometric patterns, hexagons, gradients, flat design, corporate, sterile, bright white, neon, digital artifacts, blurry text"
 }`;
 
 const DRAMATIC_INSTRUCTION = `
@@ -86,6 +90,12 @@ After extracting, internally enhance the tokens to be more visually dramatic and
 - For lightingDescription: describe WHERE the light comes from, its COLOR temperature, and what SHADOWS it casts. One evocative sentence.
 - For dominantAtmosphere: choose the single word that best captures the overall emotional register.
 - Keep all enhancements aligned with the original brand identity.
+
+For the four new fal/image-generation fields, write as a professional prompt engineer targeting Stable Diffusion / FLUX Pro. These prompts will be sent directly to image generation models — be specific, sensory, and cinematic. Avoid abstract adjectives like "vibrant", "dynamic", "modern" — describe physical reality instead:
+- flux_scene_prompt: A hero shot of the cuisine/brand environment. Specific materials, specific light source, specific camera angle. End with "no text, no UI elements, atmospheric only".
+- flux_sidebar_prompt: The same physical world as flux_scene_prompt but reframed as a narrow vertical architectural detail — a wall, a surface, a doorway edge, a texture strip. Same light, same materials, portrait framing. End with "no text, portrait orientation".
+- ideogram_sidebar_prompt: Designed for text-on-image rendering. Must include '[QUOTE_PLACEHOLDER]' literally. Describe the typography style, the surface it sits on, and the lighting. Prioritize legibility and contrast.
+- negative_prompt: List specific visual elements that would be tonally wrong for this brand. Concrete nouns and styles, not generic terms.
 `;
 
 async function extractTokensFromText(text: string): Promise<object> {
@@ -95,7 +105,7 @@ async function extractTokensFromText(text: string): Promise<object> {
     messages: [
       {
         role: "user",
-        content: `You are a brand visual analyst. Extract design tokens from this website content and return ONLY valid JSON matching this schema exactly:
+        content: `You are a brand visual analyst and professional image generation prompt engineer. Extract design tokens from this website content and return ONLY valid JSON matching this schema exactly:
 
 ${TOKEN_SCHEMA}
 ${DRAMATIC_INSTRUCTION}
@@ -103,6 +113,7 @@ ${DRAMATIC_INSTRUCTION}
 For textureWords: infer physical materials from the cuisine type, brand name, and any visual language used on the site. A seafood restaurant implies weathered dock wood, sea-worn rope, raw oyster shell. An Italian trattoria implies worn terracotta, linen tablecloth, rough stone wall. Be specific and tactile.
 For lightingDescription: infer from the cuisine's natural environment and time-of-day associations. A rooftop bar suggests golden hour sun. A dim sum restaurant suggests warm lantern light. Write one evocative sentence.
 For dominantAtmosphere: based on the overall brand personality and cuisine.
+For flux_scene_prompt / flux_sidebar_prompt / ideogram_sidebar_prompt / negative_prompt: write as a professional FLUX Pro / Stable Diffusion prompt engineer — physical, specific, cinematic. No abstract adjectives.
 
 WEBSITE CONTENT:
 ${text}
@@ -131,7 +142,7 @@ async function extractTokensFromImage(
           { type: "image", source },
           {
             type: "text",
-            text: `You are a brand visual analyst. Analyze this restaurant/brand image and extract design tokens. Return ONLY valid JSON matching this schema exactly:
+            text: `You are a brand visual analyst and professional image generation prompt engineer. Analyze this restaurant/brand image and extract design tokens. Return ONLY valid JSON matching this schema exactly:
 
 ${TOKEN_SCHEMA}
 ${DRAMATIC_INSTRUCTION}
@@ -141,6 +152,7 @@ Extraction focus:
 - textureWords: describe the physical surfaces and materials you can actually see or strongly infer — be specific and tactile (e.g. "smoked cedar planks", "poured concrete counter", "woven seagrass")
 - lightingDescription: describe exactly where the light comes from, its color temperature (warm/cool/neutral), and what shadows or highlights it creates. One vivid sentence.
 - dominantAtmosphere: the single emotional register of the image
+- flux_scene_prompt / flux_sidebar_prompt / ideogram_sidebar_prompt / negative_prompt: write as a professional FLUX Pro / Stable Diffusion prompt engineer — physical, specific, cinematic. Base these directly on what you can see in the image.
 Return ONLY the JSON object, no markdown, no explanation.`,
           },
         ],
@@ -199,6 +211,7 @@ export async function POST(request: Request) {
     // Override brand name if restaurant name is known
     if (restaurantName) tokens.brand_name = restaurantName;
 
+    console.log("=== ANALYZE-BRAND OUTPUT ===", JSON.stringify(tokens, null, 2));
     return Response.json({ tokens });
   } catch (err: unknown) {
     return Response.json({ error: (err as Error).message }, { status: 500 });

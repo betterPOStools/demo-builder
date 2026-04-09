@@ -57,6 +57,7 @@ async function fetchFalBackground(
   prompt: string,
   width: number,
   height: number,
+  negativePrompt?: string,
 ): Promise<CompareResult> {
   const falKey = process.env.FAL_KEY;
   if (!falKey) {
@@ -76,6 +77,7 @@ async function fetchFalBackground(
       },
       body: JSON.stringify({
         prompt,
+        ...(negativePrompt ? { negative_prompt: negativePrompt } : {}),
         image_size: { width, height },
         num_inference_steps: 28,
         guidance_scale: 3.5,
@@ -213,6 +215,8 @@ export async function POST(request: Request) {
       sidebarPrompt?: string;
       assetType: "background" | "sidebar";
       hasQuoteText?: boolean;
+      quoteText?: string;
+      brandTokens?: Record<string, unknown>;
       width: number;
       height: number;
     };
@@ -222,15 +226,29 @@ export async function POST(request: Request) {
       sidebarPrompt,
       assetType,
       hasQuoteText = false,
+      quoteText,
+      brandTokens,
       width,
       height,
     } = body;
 
     const falResult =
       assetType === "background"
-        ? fetchFalBackground(backgroundPrompt || keywords.join(", "), width, height)
+        ? fetchFalBackground(
+            (brandTokens?.flux_scene_prompt as string | undefined) || backgroundPrompt || keywords.join(", "),
+            width,
+            height,
+            brandTokens?.negative_prompt as string | undefined,
+          )
         : fetchFalSidebar(
-            sidebarPrompt || keywords.join(", "),
+            hasQuoteText
+              ? ((brandTokens?.ideogram_sidebar_prompt as string | undefined)
+                  ? (brandTokens!.ideogram_sidebar_prompt as string).replace(
+                      "[QUOTE_PLACEHOLDER]",
+                      quoteText ?? "",
+                    )
+                  : sidebarPrompt || keywords.join(", "))
+              : ((brandTokens?.flux_sidebar_prompt as string | undefined) || sidebarPrompt || keywords.join(", ")),
             width,
             height,
             hasQuoteText,

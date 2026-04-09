@@ -251,16 +251,19 @@ export function BrandingEditor() {
         ? [lightingDesc, ...textureWords.slice(0, 2), ...imageryKeywords.slice(0, 1)].filter(Boolean).join(". ")
         : [restaurantName, restaurantType, styleHints].filter(Boolean).join(", ") + ", atmospheric cinematic vertical";
 
+      const quoteMatch = styleHints.match(/"([^"]+)"/);
+      const quoteText = quoteMatch?.[1];
+
       const [bgData, sbData] = await Promise.all([
         fetch("/api/fetch-photo", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ keywords, backgroundPrompt, assetType: "background", hasQuoteText: false, width: 1024, height: 716 }),
+          body: JSON.stringify({ keywords, backgroundPrompt, assetType: "background", hasQuoteText: false, brandTokens, width: 1024, height: 716 }),
         }).then((r) => r.json()),
         fetch("/api/fetch-photo", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ keywords, sidebarPrompt, assetType: "sidebar", hasQuoteText, width: 360, height: 696 }),
+          body: JSON.stringify({ keywords, sidebarPrompt, assetType: "sidebar", hasQuoteText, quoteText, brandTokens, width: 360, height: 696 }),
         }).then((r) => r.json()),
       ]);
 
