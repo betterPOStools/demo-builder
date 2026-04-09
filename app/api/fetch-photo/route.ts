@@ -213,7 +213,7 @@ export async function POST(request: Request) {
       keywords: string[];
       backgroundPrompt?: string;
       sidebarPrompt?: string;
-      assetType: "background" | "sidebar";
+      assetType: "background" | "sidebar" | "combined";
       hasQuoteText?: boolean;
       quoteText?: string;
       brandTokens?: Record<string, unknown>;
@@ -236,30 +236,46 @@ export async function POST(request: Request) {
       (brandTokens?.flux_scene_prompt as string | undefined) ||
       backgroundPrompt ||
       keywords.join(", ");
-    const bgPromptFinal =
-      `${bgPromptBase} Compose with the main subject and focal interest in the right 70% of the frame — the leftmost 30% will be covered by a sidebar panel.`;
 
-    const falResult =
-      assetType === "background"
-        ? fetchFalBackground(
-            bgPromptFinal,
-            width,
-            height,
-            brandTokens?.negative_prompt as string | undefined,
-          )
-        : fetchFalSidebar(
-            hasQuoteText
-              ? ((brandTokens?.ideogram_sidebar_prompt as string | undefined)
-                  ? (brandTokens!.ideogram_sidebar_prompt as string).replace(
-                      "[QUOTE_PLACEHOLDER]",
-                      quoteText ?? "",
-                    )
-                  : sidebarPrompt || keywords.join(", "))
-              : ((brandTokens?.flux_sidebar_prompt as string | undefined) || sidebarPrompt || keywords.join(", ")),
-            width,
-            height,
-            hasQuoteText,
-          );
+    let falResult: Promise<CompareResult>;
+
+    if (assetType === "combined") {
+      // One panoramic 1384×716 image — sidebar (left 360px) + background (right 1024px) from same scene.
+      // Sidebar takes the left portion so prompt should place ambient/atmospheric content on the left
+      // and main focal subject toward center-right.
+      const combinedPrompt =
+        `${bgPromptBase} Wide panoramic composition: atmospheric ambient textures on the left third, main focal subject centered to right. No text, no UI elements.`;
+      falResult = fetchFalBackground(
+        combinedPrompt,
+        width,  // 1384
+        height, // 716
+        brandTokens?.negative_prompt as string | undefined,
+      );
+    } else if (assetType === "background") {
+      const bgPromptFinal =
+        `${bgPromptBase} Compose with the main subject and focal interest in the right 70% of the frame — the leftmost 30% will be covered by a sidebar panel.`;
+      falResult = fetchFalBackground(
+        bgPromptFinal,
+        width,
+        height,
+        brandTokens?.negative_prompt as string | undefined,
+      );
+    } else {
+      // sidebar
+      falResult = fetchFalSidebar(
+        hasQuoteText
+          ? ((brandTokens?.ideogram_sidebar_prompt as string | undefined)
+              ? (brandTokens!.ideogram_sidebar_prompt as string).replace(
+                  "[QUOTE_PLACEHOLDER]",
+                  quoteText ?? "",
+                )
+              : sidebarPrompt || keywords.join(", "))
+          : ((brandTokens?.flux_sidebar_prompt as string | undefined) || sidebarPrompt || keywords.join(", ")),
+        width,
+        height,
+        hasQuoteText,
+      );
+    }
 
     const [fal, unsplash] = await Promise.all([
       falResult,

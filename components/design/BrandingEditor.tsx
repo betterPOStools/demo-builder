@@ -340,7 +340,7 @@ export function BrandingEditor() {
 
   async function generateSeamless() {
     setGenerating(true);
-    setGenProgress("Generating seamless pair...");
+    setGenProgress("Generating seamless panoramic...");
     try {
       const imageryKeywords = (brandTokens?.imagery_keywords as string[] | undefined) ?? [];
       const textureWords = (brandTokens?.textureWords as string[] | undefined) ?? [];
@@ -351,45 +351,33 @@ export function BrandingEditor() {
       ].filter(Boolean);
       const backgroundPrompt = brandTokens
         ? [lightingDesc, ...imageryKeywords.slice(0, 2), ...textureWords.slice(0, 2)].filter(Boolean).join(". ")
-        : [restaurantName, restaurantType, styleHints].filter(Boolean).join(", ") + ", atmospheric cinematic background";
-      const hasQuoteText = /"[^"]+"/.test(styleHints);
-      const sidebarPrompt = brandTokens
-        ? [lightingDesc, ...textureWords.slice(0, 2), ...imageryKeywords.slice(0, 1)].filter(Boolean).join(". ")
-        : [restaurantName, restaurantType, styleHints].filter(Boolean).join(", ") + ", atmospheric cinematic vertical";
-      const quoteMatch = styleHints.match(/"([^"]+)"/);
-      const quoteText = quoteMatch?.[1];
+        : [restaurantName, restaurantType, styleHints].filter(Boolean).join(", ") + ", atmospheric cinematic panoramic";
 
-      const [bgData, sbData] = await Promise.all([
-        fetch("/api/fetch-photo", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ keywords, backgroundPrompt, assetType: "background", hasQuoteText: false, brandTokens, width: 1024, height: 716 }),
-        }).then((r) => r.json()),
-        fetch("/api/fetch-photo", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ keywords, sidebarPrompt, assetType: "sidebar", hasQuoteText, quoteText, brandTokens, width: 360, height: 696 }),
-        }).then((r) => r.json()),
-      ]);
+      // Generate ONE combined 1384×716 panoramic image — then split into sidebar + background
+      const data = await fetch("/api/fetch-photo", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          keywords,
+          backgroundPrompt,
+          assetType: "combined",
+          brandTokens,
+          width: COMBINED_W,  // 1384
+          height: COMBINED_H, // 716
+        }),
+      }).then((r) => r.json());
 
-      const bgUri = bgData.results?.[0]?.dataUri as string | undefined;
-      const sbUri = sbData.results?.[0]?.dataUri as string | undefined;
+      const combinedUri = data.results?.[0]?.dataUri as string | undefined;
+      if (!combinedUri) throw new Error("No image returned from fal");
 
-      if (!bgUri && !sbUri) throw new Error("No images returned from fal");
+      setGenProgress("Splitting into sidebar + background...");
+      const { sidebarPng, backgroundPng } = await splitBrandingImage(combinedUri);
 
       const ts = new Date().toISOString();
       const seamlessId = generateId();
-      if (sbUri) {
-        addGeneratedImage({ id: generateId(), type: "sidebar", dataUri: sbUri, createdAt: ts, restaurantName: restaurantName || undefined, seamlessId });
-      }
-      if (bgUri) {
-        addGeneratedImage({ id: generateId(), type: "background", dataUri: bgUri, createdAt: ts, restaurantName: restaurantName || undefined, seamlessId });
-      }
-      setPreview((prev) => ({
-        ...prev,
-        ...(sbUri ? { sidebarPng: sbUri } : {}),
-        ...(bgUri ? { backgroundPng: bgUri } : {}),
-      }));
+      addGeneratedImage({ id: generateId(), type: "sidebar", dataUri: sidebarPng, createdAt: ts, restaurantName: restaurantName || undefined, seamlessId });
+      addGeneratedImage({ id: generateId(), type: "background", dataUri: backgroundPng, createdAt: ts, restaurantName: restaurantName || undefined, seamlessId });
+      setPreview((prev) => ({ ...prev, sidebarPng, backgroundPng }));
     } catch (err) {
       console.error("Seamless generation failed:", err);
     } finally {
