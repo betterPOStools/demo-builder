@@ -5,6 +5,7 @@ import { AppShell } from "@/components/layout/AppShell";
 import { useStore } from "@/store";
 import { useAutoSave } from "@/lib/hooks/useAutoSave";
 import { useImageLibrarySync } from "@/lib/hooks/useImageLibrarySync";
+import { useBrandAnalysisSync } from "@/lib/hooks/useBrandAnalysisSync";
 
 export default function ProjectLayout({
   children,
@@ -49,8 +50,9 @@ export default function ProjectLayout({
   // Auto-save to Supabase
   useAutoSave(id);
 
-  // Sync image library to/from localStorage (global across all projects)
+  // Sync image library + brand analyses to/from localStorage
   useImageLibrarySync();
+  useBrandAnalysisSync();
 
   if (loading) {
     return (

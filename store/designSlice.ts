@@ -29,6 +29,16 @@ export interface GeneratedImage {
   itemName?: string; // for type "item" — which menu item this was generated for
 }
 
+export interface SavedBrandAnalysis {
+  id: string;
+  createdAt: string;
+  brandName: string;
+  sourceType: "url" | "image";
+  sourceLabel: string; // domain for URL, "Photo" for image
+  thumbnailDataUri: string | null; // resized image for uploads; null for URL
+  tokens: Record<string, unknown>;
+}
+
 export interface DesignSlice {
   // State
   groups: GroupNode[];
@@ -36,6 +46,7 @@ export interface DesignSlice {
   rooms: RoomNode[];
   branding: BrandingState;
   imageLibrary: GeneratedImage[];
+  brandAnalyses: SavedBrandAnalysis[];
   designOrigin: DesignOrigin;
   isDirty: boolean;
 
@@ -85,6 +96,10 @@ export interface DesignSlice {
   deleteGeneratedImage: (imageId: string) => void;
   clearImageLibrary: (type?: GeneratedImage["type"]) => void;
 
+  // Brand analyses
+  saveBrandAnalysis: (analysis: SavedBrandAnalysis) => void;
+  deleteBrandAnalysis: (id: string) => void;
+
   // Clear
   clearDesign: () => void;
 }
@@ -103,6 +118,7 @@ export const createDesignSlice: StateCreator<DesignSlice> = (set) => ({
   rooms: [],
   branding: { ...DEFAULT_BRANDING },
   imageLibrary: [],
+  brandAnalyses: [],
   designOrigin: { type: "fresh" },
   isDirty: false,
 
@@ -470,6 +486,19 @@ export const createDesignSlice: StateCreator<DesignSlice> = (set) => ({
         ? state.imageLibrary.filter((i) => i.type !== type)
         : [],
       isDirty: true,
+    })),
+
+  saveBrandAnalysis: (analysis) =>
+    set((state) => ({
+      brandAnalyses: [
+        analysis,
+        ...state.brandAnalyses.filter((a) => a.id !== analysis.id),
+      ].slice(0, 20), // keep most recent 20
+    })),
+
+  deleteBrandAnalysis: (id) =>
+    set((state) => ({
+      brandAnalyses: state.brandAnalyses.filter((a) => a.id !== id),
     })),
 
   clearDesign: () =>

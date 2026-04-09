@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useCallback } from "react";
 import { Lightbox, type LightboxImage } from "@/components/ui/Lightbox";
 import {
   Palette,
@@ -23,6 +23,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { useStore } from "@/store";
+import type { SavedBrandAnalysis } from "@/store/designSlice";
 import { isLightColor, generateId } from "@/lib/utils";
 import { htmlToPng } from "@/lib/htmlToPng";
 import { splitBrandingImage, splitUploadedImage, COMBINED_W, COMBINED_H } from "@/lib/splitBrandingImage";
@@ -144,6 +145,23 @@ interface BrandingPreview {
   backgroundPng?: string;
 }
 
+async function resizeToThumbnail(base64: string, mediaType: string): Promise<string> {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement("canvas");
+      const maxW = 120, maxH = 80;
+      const ratio = Math.min(maxW / img.width, maxH / img.height);
+      canvas.width = Math.round(img.width * ratio);
+      canvas.height = Math.round(img.height * ratio);
+      canvas.getContext("2d")!.drawImage(img, 0, 0, canvas.width, canvas.height);
+      resolve(canvas.toDataURL("image/jpeg", 0.7));
+    };
+    img.onerror = () => resolve("");
+    img.src = `data:${mediaType};base64,${base64}`;
+  });
+}
+
 export function BrandingEditor() {
   const branding = useStore((s) => s.branding);
   const updateBranding = useStore((s) => s.updateBranding);
@@ -153,6 +171,9 @@ export function BrandingEditor() {
   const imageLibrary = useStore((s) => s.imageLibrary);
   const addGeneratedImage = useStore((s) => s.addGeneratedImage);
   const deleteGeneratedImage = useStore((s) => s.deleteGeneratedImage);
+  const brandAnalyses = useStore((s) => s.brandAnalyses);
+  const saveBrandAnalysis = useStore((s) => s.saveBrandAnalysis);
+  const deleteBrandAnalysis = useStore((s) => s.deleteBrandAnalysis);
 
   const [styleHints, setStyleHints] = useState("");
   const [generating, setGenerating] = useState(false);
@@ -195,12 +216,18 @@ export function BrandingEditor() {
     setAnalyzing(true);
     try {
       let body: Record<string, unknown>;
+      let base64ForThumb: string | null = null;
+      let mediaTypeForThumb: string | null = null;
+
       if (imageFile) {
         const base64 = await fileToBase64(imageFile);
+        base64ForThumb = base64;
+        mediaTypeForThumb = imageFile.type;
         body = { imageBase64: base64, imageMediaType: imageFile.type, restaurantName };
       } else {
         body = { url: brandUrl.trim(), restaurantName };
       }
+
       const res = await fetch("/api/analyze-brand", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -208,7 +235,26 @@ export function BrandingEditor() {
       });
       if (!res.ok) throw new Error("Analysis failed");
       const data = await res.json();
-      setBrandTokens(data.tokens);
+      const tokens = data.tokens as Record<string, unknown>;
+      setBrandTokens(tokens);
+
+      // Save to persistent library
+      const thumbnailDataUri = base64ForThumb && mediaTypeForThumb
+        ? await resizeToThumbnail(base64ForThumb, mediaTypeForThumb)
+        : null;
+      const sourceLabel = imageFile
+        ? (imageFile.name || "Photo")
+        : (() => { try { return new URL(brandUrl.trim()).hostname.replace(/^www\./, ""); } catch { return brandUrl.trim(); } })();
+
+      saveBrandAnalysis({
+        id: generateId(),
+        createdAt: new Date().toISOString(),
+        brandName: (tokens.brand_name as string | undefined) || restaurantName || sourceLabel,
+        sourceType: imageFile ? "image" : "url",
+        sourceLabel,
+        thumbnailDataUri,
+        tokens,
+      });
     } catch (err) {
       setBrandError((err as Error).message);
     } finally {
@@ -403,6 +449,54 @@ export function BrandingEditor() {
                 </button>
               )}
             </div>
+
+            {/* Saved analyses — always visible when entries exist */}
+            {brandAnalyses.length > 0 && (
+              <div className="flex gap-2 overflow-x-auto pb-1 -mx-0.5 px-0.5">
+                {brandAnalyses.map((a) => {
+                  const palette = a.tokens.color_palette as Record<string, string> | undefined;
+                  const isActive = brandTokens === a.tokens;
+                  return (
+                    <div
+                      key={a.id}
+                      className={`group relative flex-shrink-0 cursor-pointer rounded border transition ${
+                        isActive
+                          ? "border-blue-500 ring-1 ring-blue-500/40"
+                          : "border-slate-700 hover:border-slate-500"
+                      }`}
+                      style={{ width: 80 }}
+                      onClick={() => setBrandTokens(a.tokens)}
+                      title={a.brandName}
+                    >
+                      {a.thumbnailDataUri ? (
+                        <img
+                          src={a.thumbnailDataUri}
+                          alt={a.brandName}
+                          className="w-full rounded-t object-cover"
+                          style={{ height: 52 }}
+                        />
+                      ) : (
+                        <div className="flex gap-0.5 p-1.5 rounded-t" style={{ height: 52, backgroundColor: palette?.background || "#0d1b2a" }}>
+                          {palette && Object.values(palette).slice(0, 3).map((c, i) => (
+                            <div key={i} className="flex-1 rounded-sm" style={{ backgroundColor: c }} />
+                          ))}
+                        </div>
+                      )}
+                      <div className="px-1.5 py-1 bg-slate-900 rounded-b">
+                        <p className="text-[9px] text-slate-300 truncate leading-tight">{a.brandName}</p>
+                        <p className="text-[8px] text-slate-600 truncate">{a.sourceLabel}</p>
+                      </div>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); deleteBrandAnalysis(a.id); }}
+                        className="absolute right-0.5 top-0.5 hidden rounded bg-black/70 p-0.5 text-red-400 hover:text-red-300 group-hover:block"
+                      >
+                        <X className="h-2.5 w-2.5" />
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
 
             {!brandTokens ? (
               <>
