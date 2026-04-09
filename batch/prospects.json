@@ -1,0 +1,13 @@
+{
+  "version": "1",
+  "prospects": [
+    {
+      "id": "example-restaurant",
+      "name": "Example Restaurant",
+      "menu_url": "https://example.com/menu",
+      "type": "fast_casual",
+      "crm_id": null,
+      "notes": null
+    }
+  ]
+}

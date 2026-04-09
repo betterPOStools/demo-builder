@@ -42,3 +42,6 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 agent/.env
+
+# batch pipeline — snapshots are large SQL files, not committed
+batch/snapshots/

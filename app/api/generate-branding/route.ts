@@ -2,33 +2,58 @@ import Anthropic from "@anthropic-ai/sdk";
 
 const client = new Anthropic();
 
+export const maxDuration = 60;
+
+function buildRichContext(t: Record<string, unknown>): string {
+  const palette = (t.color_palette as Record<string, string>) ?? {};
+  return [
+    t.brand_name && `Brand: ${t.brand_name}`,
+    t.industry && `Industry: ${t.industry}`,
+    palette.primary &&
+      `Color story: ${palette.primary} (primary), ${palette.secondary} (secondary), ${palette.accent} (accent), ${palette.background} (dark base)`,
+    t.mood && `Mood: ${(t.mood as string[]).join(", ")}`,
+    t.visual_style && `Visual style: ${(t.visual_style as string[]).join(", ")}`,
+    t.lighting_style &&
+      `Lighting: ${(t.lighting_style as string[]).join(", ")}`,
+    t.textures && `Textures to suggest: ${(t.textures as string[]).join(", ")}`,
+    t.imagery_keywords &&
+      `Key imagery (blurred, atmospheric): ${(t.imagery_keywords as string[]).join("; ")}`,
+    t.composition_style &&
+      `Composition: ${(t.composition_style as string[]).join(", ")}`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
 export async function POST(request: Request) {
   try {
-    const { restaurantName, restaurantType, groups, type, styleHints } =
+    const { restaurantName, restaurantType, groups, type, styleHints, brandTokens } =
       (await request.json()) as {
         restaurantName?: string;
         restaurantType?: string;
         groups?: string[];
         type: "sidebar" | "background" | "palette" | "unified";
         styleHints?: string;
+        brandTokens?: Record<string, unknown>;
       };
 
     // Extract "Quoted Title" from styleHints → renders as text in sidebar
     const titleMatch = styleHints?.match(/"([^"]+)"/);
     const displayTitle = titleMatch?.[1]?.trim() ?? null;
-    const cleanedHints = styleHints
-      ?.replace(/"[^"]*"/g, "")
-      .replace(/,\s*,/g, ",")
-      .trim() || undefined;
+    const cleanedHints =
+      styleHints?.replace(/"[^"]*"/g, "").replace(/,\s*,/g, ",").trim() ||
+      undefined;
 
-    const context = [
-      restaurantName && `Restaurant: ${restaurantName}`,
-      restaurantType && `Type: ${restaurantType}`,
-      groups?.length && `Menu groups: ${groups.join(", ")}`,
-      cleanedHints && `Style notes: ${cleanedHints}`,
-    ]
-      .filter(Boolean)
-      .join("\n");
+    const context = brandTokens
+      ? buildRichContext(brandTokens)
+      : [
+          restaurantName && `Restaurant: ${restaurantName}`,
+          restaurantType && `Type: ${restaurantType}`,
+          groups?.length && `Menu groups: ${groups.join(", ")}`,
+          cleanedHints && `Style notes: ${cleanedHints}`,
+        ]
+          .filter(Boolean)
+          .join("\n");
 
     // --- Palette: return JSON color recommendations ---
     if (type === "palette") {
@@ -96,7 +121,7 @@ Rules:
       const unifiedPrompt = `You are an expert CSS visual designer. Create a single seamless full-screen background for a restaurant POS terminal.
 
 ${context}
-
+${brandTokens ? "\nBRAND ANALYSIS: Use the specific colors, textures, and imagery keywords above as the foundation. The color palette is derived from actual brand analysis — use those exact hex values as the basis for gradient colors." : ""}
 CANVAS: exactly 1384px wide × 716px tall. Rasterized to PNG, then split:
 - LEFT 360px  → sidebar strip (portrait, decorative chrome)
 - RIGHT 1024px → main background (POS buttons and menu items sit on top)
@@ -182,7 +207,7 @@ DESIGN:
       const sidebarPrompt = `You are an expert CSS visual designer. Create a richly layered sidebar banner for a restaurant POS terminal.
 
 ${context}
-
+${brandTokens ? "\nBRAND ANALYSIS: Use the specific brand colors and imagery keywords above. Be bold and vivid — this is the showcase panel." : ""}
 CANVAS: exactly 360px wide × 696px tall. Rasterized to PNG by html2canvas.
 
 OUTPUT: Return a <style> block followed immediately by a single root <div>. No JSON, no markdown — raw HTML only.
@@ -239,7 +264,7 @@ DESIGN:
     const backgroundPrompt = `You are an expert CSS visual designer. Create a soft, cinematic background for a restaurant POS terminal's main screen.
 
 ${context}
-
+${brandTokens ? "\nBRAND ANALYSIS: Use the specific colors, textures, and imagery keywords above as the foundation. The color palette is derived from actual brand analysis — use those exact hex values as the basis for gradient colors." : ""}
 CANVAS: exactly 1024px wide × 716px tall. Rasterized to PNG by html2canvas.
 
 OUTPUT: Return a <style> block followed immediately by a single root <div>. No JSON, no markdown — raw HTML only.

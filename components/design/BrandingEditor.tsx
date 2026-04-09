@@ -11,6 +11,7 @@ import {
   Trash2,
   Library,
   Wand2,
+  ScanSearch,
 } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -81,6 +82,50 @@ function ColorField({
   );
 }
 
+function BrandTokenDisplay({ tokens }: { tokens: Record<string, unknown> }) {
+  const palette = tokens.color_palette as Record<string, string> | undefined;
+  const mood = (tokens.mood as string[] | undefined) ?? [];
+  const visualStyle = (tokens.visual_style as string[] | undefined) ?? [];
+  const imageryKeywords = (tokens.imagery_keywords as string[] | undefined) ?? [];
+  const chips = [...mood, ...visualStyle];
+
+  return (
+    <div className="space-y-2">
+      <div className="space-y-1">
+        {palette && (
+          <div className="flex gap-1.5 items-center">
+            {Object.entries(palette).map(([k, v]) => (
+              <div
+                key={k}
+                title={`${k}: ${v}`}
+                className="h-5 w-5 rounded border border-slate-600"
+                style={{ backgroundColor: v }}
+              />
+            ))}
+            <span className="text-[10px] text-slate-500 ml-1">Brand colors</span>
+          </div>
+        )}
+        <div className="flex flex-wrap gap-1">
+          {chips.map((tag) => (
+            <span
+              key={tag}
+              className="rounded-full bg-blue-950/60 border border-blue-800/50 px-2 py-0.5 text-[10px] text-blue-300"
+            >
+              {tag}
+            </span>
+          ))}
+        </div>
+        {imageryKeywords.length > 0 && (
+          <p className="text-[10px] text-slate-500 italic">
+            {imageryKeywords.slice(0, 3).join(" · ")}
+          </p>
+        )}
+      </div>
+      <p className="text-[10px] text-emerald-400">✓ Brand analysis active — generation will use these tokens</p>
+    </div>
+  );
+}
+
 const PREVIEW_SERVICES = [
   { label: "Dine In", fallback: "#16a34a" },
   { label: "Pick Up", fallback: "#2563eb" },
@@ -117,6 +162,12 @@ export function BrandingEditor() {
   const [lightbox, setLightbox] = useState<LightboxImage[] | null>(null);
   const [lightboxIdx, setLightboxIdx] = useState(0);
 
+  // Brand Intelligence state
+  const [brandUrl, setBrandUrl] = useState("");
+  const [analyzing, setAnalyzing] = useState(false);
+  const [brandTokens, setBrandTokens] = useState<Record<string, unknown> | null>(null);
+  const [brandError, setBrandError] = useState("");
+
   const bg = branding.background || "#0f172a";
   const btnBg = branding.buttons_background_color;
   const btnFg = branding.buttons_font_color || "#ffffff";
@@ -126,7 +177,43 @@ export function BrandingEditor() {
     restaurantType,
     groups: groups.map((g) => g.name),
     styleHints: styleHints.trim() || undefined,
+    brandTokens: brandTokens ?? undefined,
   };
+
+  function fileToBase64(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve((reader.result as string).split(",")[1]);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  }
+
+  async function analyzeBrand(imageFile?: File) {
+    setBrandError("");
+    setAnalyzing(true);
+    try {
+      let body: Record<string, unknown>;
+      if (imageFile) {
+        const base64 = await fileToBase64(imageFile);
+        body = { imageBase64: base64, imageMediaType: imageFile.type, restaurantName };
+      } else {
+        body = { url: brandUrl.trim(), restaurantName };
+      }
+      const res = await fetch("/api/analyze-brand", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw new Error("Analysis failed");
+      const data = await res.json();
+      setBrandTokens(data.tokens);
+    } catch (err) {
+      setBrandError((err as Error).message);
+    } finally {
+      setAnalyzing(false);
+    }
+  }
 
   async function generateAll() {
     setGenerating(true);
@@ -296,6 +383,61 @@ export function BrandingEditor() {
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
+          {/* Brand Intelligence */}
+          <div className="rounded-lg border border-slate-700 bg-slate-800/50 p-3 space-y-2.5">
+            <div className="flex items-center justify-between">
+              <Label className="text-xs text-slate-400 flex items-center gap-1.5">
+                <ScanSearch className="h-3.5 w-3.5 text-blue-400" />
+                Brand Intelligence
+              </Label>
+              {brandTokens && (
+                <button onClick={() => setBrandTokens(null)} className="text-[10px] text-slate-500 hover:text-red-400">
+                  Clear
+                </button>
+              )}
+            </div>
+
+            {!brandTokens ? (
+              <>
+                <div className="flex gap-2">
+                  <Input
+                    value={brandUrl}
+                    onChange={(e) => setBrandUrl(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && brandUrl.trim() && analyzeBrand()}
+                    placeholder="Website or image URL to analyze…"
+                    className="h-8 text-xs flex-1"
+                  />
+                  <Button
+                    size="sm"
+                    onClick={() => analyzeBrand()}
+                    disabled={analyzing || !brandUrl.trim()}
+                    className="h-8 px-3 text-xs"
+                  >
+                    {analyzing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Analyze"}
+                  </Button>
+                </div>
+                <label className={`flex cursor-pointer items-center gap-1.5 text-[10px] text-slate-500 hover:text-slate-300 ${analyzing ? "pointer-events-none opacity-40" : ""}`}>
+                  <Wand2 className="h-3 w-3" />
+                  or drop a brand/restaurant photo
+                  <input
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      e.target.value = "";
+                      if (f) analyzeBrand(f);
+                    }}
+                    disabled={analyzing}
+                  />
+                </label>
+                {brandError && <p className="text-[10px] text-red-400">{brandError}</p>}
+              </>
+            ) : (
+              <BrandTokenDisplay tokens={brandTokens} />
+            )}
+          </div>
+
           {/* AI Generate Section */}
           <div className="rounded-lg border border-slate-700 bg-slate-800/50 p-3 space-y-2.5">
             <Label className="text-xs text-slate-400">AI Branding Generator</Label>
