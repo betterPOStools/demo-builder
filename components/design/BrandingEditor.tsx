@@ -756,31 +756,39 @@ export function BrandingEditor() {
                 <div className="h-2 w-2 rounded-full bg-green-500" />
                 <span className="ml-1.5 text-[9px] text-slate-600">POS Main Screen</span>
               </div>
+              {/* 1024:716 aspect ratio — sidebar is 360/1024 = 35.16% of width */}
               <div
-                className="relative flex h-48 items-center justify-center"
+                className="relative w-full"
                 style={{
+                  aspectRatio: "1024 / 716",
                   backgroundColor: bg,
                   backgroundImage: branding.background_picture ? `url(${branding.background_picture})` : undefined,
                   backgroundSize: "cover",
                   backgroundPosition: "center",
                 }}
               >
-                {branding.sidebar_picture ? (
-                  <div className="absolute left-0 top-0 h-full w-10 bg-[#0a0f1a]">
-                    <img src={branding.sidebar_picture} alt="" className="h-full w-full object-cover opacity-80" />
-                  </div>
-                ) : (
-                  <div className="absolute left-0 top-0 h-full w-10 bg-[#0a0f1a]/60" />
-                )}
-                <div className="flex flex-wrap justify-center gap-2 pl-8">
+                {/* Sidebar strip */}
+                <div
+                  className="absolute left-0 top-0 h-full bg-[#0a0f1a]"
+                  style={{ width: "35.16%" }}
+                >
+                  {branding.sidebar_picture && (
+                    <img src={branding.sidebar_picture} alt="" className="h-full w-full object-cover" />
+                  )}
+                </div>
+                {/* Main button area */}
+                <div
+                  className="absolute top-0 h-full flex flex-wrap content-center justify-center gap-[1.5%] p-[3%]"
+                  style={{ left: "35.16%", right: 0 }}
+                >
                   {PREVIEW_SERVICES.map((s) => {
-                    const bg = btnBg || s.fallback;
-                    const fg = btnFg || (isLightColor(bg) ? "#1e293b" : "#ffffff");
+                    const btnColor = btnBg || s.fallback;
+                    const fg = btnFg || (isLightColor(btnColor) ? "#1e293b" : "#ffffff");
                     return (
                       <div
                         key={s.label}
-                        className="flex h-14 w-20 items-center justify-center rounded-lg text-[9px] font-bold shadow-md"
-                        style={{ backgroundColor: bg, color: fg }}
+                        className="flex items-center justify-center rounded font-bold shadow-md text-[7px]"
+                        style={{ backgroundColor: btnColor, color: fg, width: "28%", height: "22%" }}
                       >
                         {s.label}
                       </div>
