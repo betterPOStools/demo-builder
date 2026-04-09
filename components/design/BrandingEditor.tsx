@@ -761,7 +761,6 @@ export function BrandingEditor() {
                 className="relative overflow-hidden"
                 style={{
                   width: "100%",
-                  maxWidth: 358,
                   aspectRatio: "1024 / 716",
                   backgroundColor: bg,
                   backgroundImage: branding.background_picture ? `url(${branding.background_picture})` : undefined,
@@ -772,7 +771,7 @@ export function BrandingEditor() {
                 {/* Sidebar — 360/1024 wide, 696/716 tall, 3px from edges */}
                 <div
                   className="absolute bg-[#0a0f1a]"
-                  style={{ left: 3, top: 3, width: "35.16%", height: "97.2%" }}
+                  style={{ left: 3, top: 3, bottom: 3, width: "35.16%" }}
                 >
                   {branding.sidebar_picture ? (
                     <img src={branding.sidebar_picture} alt="" className="h-full w-full object-cover" />
