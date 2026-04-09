@@ -1,37 +1,93 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { extractConceptTags, extractFoodCategory } from "@/lib/itemTags";
 
 const client = new Anthropic();
 
-export async function POST(request: Request) {
-  try {
-    const { itemName, groupName, restaurantType, styleHints } =
-      (await request.json()) as {
-        itemName: string;
-        groupName?: string;
-        restaurantType?: string;
-        styleHints?: string;
-      };
+export const maxDuration = 60;
 
-    if (!itemName) {
-      return Response.json({ error: "itemName is required" }, { status: 400 });
-    }
+// ─── fal.ai — FLUX Schnell (primary) ─────────────────────────────────────────
 
-    const context = [
-      `Menu item: ${itemName}`,
-      groupName && `Group: ${groupName}`,
-      restaurantType && `Restaurant type: ${restaurantType}`,
-      styleHints && `Style: ${styleHints}`,
-    ]
-      .filter(Boolean)
-      .join("\n");
+async function generateViaFal(
+  itemName: string,
+  groupName?: string,
+  restaurantType?: string,
+  styleHints?: string,
+  negativePrompt?: string,
+): Promise<string> {
+  const falKey = process.env.FAL_KEY;
+  if (!falKey) throw new Error("FAL_KEY not set");
 
-    const msg = await client.messages.create({
-      model: "claude-haiku-4-5-20251001",
-      max_tokens: 4096,
-      messages: [
-        {
-          role: "user",
-          content: `Create an SVG icon for a POS (point of sale) menu item button. The icon should be 90x90px.
+  const context = [
+    restaurantType && `${restaurantType} restaurant`,
+    groupName && `${groupName} category`,
+  ]
+    .filter(Boolean)
+    .join(", ");
+
+  const style = styleHints ? `, ${styleHints}` : "";
+  const prompt =
+    `Food photography of ${itemName}` +
+    (context ? `, ${context}` : "") +
+    `, clean neutral dark background, studio lighting, appetizing close-up, square composition, no text, no labels${style}`;
+
+  const res = await fetch("https://fal.run/fal-ai/flux/schnell", {
+    method: "POST",
+    headers: {
+      Authorization: `Key ${falKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      prompt,
+      ...(negativePrompt ? { negative_prompt: negativePrompt } : {}),
+      image_size: { width: 512, height: 512 },
+      num_inference_steps: 4,
+      safety_tolerance: "5",
+    }),
+    signal: AbortSignal.timeout(30000),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`fal HTTP ${res.status}: ${text.slice(0, 200)}`);
+  }
+
+  const data = (await res.json()) as { images?: { url: string }[] };
+  const imageUrl = data.images?.[0]?.url;
+  if (!imageUrl) throw new Error("No image URL in fal response");
+
+  // Download and convert to data URI
+  const imgRes = await fetch(imageUrl, { signal: AbortSignal.timeout(15000) });
+  if (!imgRes.ok) throw new Error(`Image download failed: HTTP ${imgRes.status}`);
+  const arrayBuffer = await imgRes.arrayBuffer();
+  const base64 = Buffer.from(arrayBuffer).toString("base64");
+  const contentType = imgRes.headers.get("content-type") || "image/webp";
+  return `data:${contentType};base64,${base64}`;
+}
+
+// ─── Claude Haiku — SVG fallback ─────────────────────────────────────────────
+
+async function generateViaClaude(
+  itemName: string,
+  groupName?: string,
+  restaurantType?: string,
+  styleHints?: string,
+): Promise<string> {
+  const context = [
+    `Menu item: ${itemName}`,
+    groupName && `Group: ${groupName}`,
+    restaurantType && `Restaurant type: ${restaurantType}`,
+    styleHints && `Style: ${styleHints}`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  const msg = await client.messages.create({
+    model: "claude-haiku-4-5-20251001",
+    max_tokens: 4096,
+    messages: [
+      {
+        role: "user",
+        content: `Create an SVG icon for a POS (point of sale) menu item button. The icon should be 90x90px.
 
 ${context}
 
@@ -48,34 +104,64 @@ Requirements:
 - The SVG root element must NOT have a background-color style or a filled rect covering the whole canvas
 
 Return ONLY the SVG code, no explanation.`,
-        },
-      ],
-    });
+      },
+    ],
+  });
 
-    const text = msg.content[0].type === "text" ? msg.content[0].text : "";
+  const text = msg.content[0].type === "text" ? msg.content[0].text : "";
+  const svgMatch = text.match(/<svg[\s\S]*?<\/svg>/);
+  if (!svgMatch) throw new Error("No SVG found in Claude response");
+  return svgMatch[0];
+}
 
-    const svgMatch = text.match(/<svg[\s\S]*?<\/svg>/);
-    if (!svgMatch) {
-      return Response.json(
-        { error: "No SVG found in response", raw: text.slice(0, 500) },
-        { status: 500 },
-      );
+// ─── Route ────────────────────────────────────────────────────────────────────
+
+export async function POST(request: Request) {
+  try {
+    const { itemName, groupName, restaurantType, styleHints } =
+      (await request.json()) as {
+        itemName: string;
+        groupName?: string;
+        restaurantType?: string;
+        styleHints?: string;
+      };
+
+    if (!itemName) {
+      return Response.json({ error: "itemName is required" }, { status: 400 });
     }
 
-    const svg = svgMatch[0];
+    const conceptTags = extractConceptTags(itemName, groupName, restaurantType);
+    const foodCategory = extractFoodCategory(groupName);
+    const cuisineType = restaurantType?.toLowerCase() || "general";
 
+    // Try fal first, fall back to Claude SVG
+    try {
+      const dataUri = await generateViaFal(itemName, groupName, restaurantType, styleHints);
+      return Response.json({
+        dataUri,
+        itemName,
+        source: "fal",
+        conceptTags,
+        foodCategory,
+        cuisineType,
+        generatedFor: undefined,
+      });
+    } catch (falErr) {
+      console.warn("fal generation failed, falling back to Claude SVG:", (falErr as Error).message);
+    }
+
+    // Claude SVG fallback
+    const svg = await generateViaClaude(itemName, groupName, restaurantType, styleHints);
     return Response.json({
       svg,
       itemName,
-      usage: {
-        input_tokens: msg.usage.input_tokens,
-        output_tokens: msg.usage.output_tokens,
-      },
+      source: "claude",
+      conceptTags,
+      foodCategory,
+      cuisineType,
+      generatedFor: undefined,
     });
   } catch (error: unknown) {
-    return Response.json(
-      { error: (error as Error).message },
-      { status: 500 },
-    );
+    return Response.json({ error: (error as Error).message }, { status: 500 });
   }
 }

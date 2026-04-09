@@ -27,6 +27,12 @@ export interface GeneratedImage {
   createdAt: string;
   restaurantName?: string;
   itemName?: string; // for type "item" — which menu item this was generated for
+  // Concept tagging for smart library reuse
+  conceptTags?: string[];
+  cuisineType?: string;
+  foodCategory?: string;
+  visualDescription?: string;
+  generatedFor?: string; // restaurant name at time of generation
 }
 
 export interface SavedBrandAnalysis {

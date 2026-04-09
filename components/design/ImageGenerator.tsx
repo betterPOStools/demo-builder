@@ -23,6 +23,7 @@ import {
 import { useStore } from "@/store";
 import { generateId } from "@/lib/utils";
 import { svgToPng } from "@/lib/svgToPng";
+import { extractConceptTags, extractFoodCategory } from "@/lib/itemTags";
 import type { GeneratedImage } from "@/store/designSlice";
 
 interface ItemImageStatus {
@@ -38,6 +39,7 @@ export function ImageGenerator() {
   const items = useStore((s) => s.items);
   const groups = useStore((s) => s.groups);
   const restaurantType = useStore((s) => s.restaurantType);
+  const restaurantName = useStore((s) => s.restaurantName);
   const imageLibrary = useStore((s) => s.imageLibrary);
   const addGeneratedImage = useStore((s) => s.addGeneratedImage);
   const deleteGeneratedImage = useStore((s) => s.deleteGeneratedImage);
@@ -57,7 +59,7 @@ export function ImageGenerator() {
     async (
       itemName: string,
       groupName: string,
-    ): Promise<{ dataUri: string } | { error: string }> => {
+    ): Promise<{ dataUri: string; conceptTags: string[]; foodCategory: string; cuisineType: string } | { error: string }> => {
       try {
         const res = await fetch("/api/generate-item-image", {
           method: "POST",
@@ -76,8 +78,16 @@ export function ImageGenerator() {
         }
 
         const data = await res.json();
-        const png = await svgToPng(data.svg, 90, 90);
-        return { dataUri: png };
+        const dataUri = data.dataUri
+          ? (data.dataUri as string)
+          : await svgToPng(data.svg as string, 90, 90);
+
+        return {
+          dataUri,
+          conceptTags: (data.conceptTags as string[]) || [],
+          foodCategory: (data.foodCategory as string) || "entree",
+          cuisineType: (data.cuisineType as string) || "general",
+        };
       } catch (err) {
         return { error: (err as Error).message };
       }
@@ -125,6 +135,10 @@ export function ImageGenerator() {
             dataUri: result.dataUri,
             createdAt: new Date().toISOString(),
             itemName: item.itemName,
+            conceptTags: result.conceptTags,
+            foodCategory: result.foodCategory,
+            cuisineType: result.cuisineType,
+            generatedFor: restaurantName || undefined,
           };
           addGeneratedImage(genImage);
 
@@ -161,16 +175,47 @@ export function ImageGenerator() {
     updateItem(itemId, { posImagePath: dataUri });
   }
 
+  function scoreMatch(
+    item: (typeof items)[number],
+    img: GeneratedImage,
+  ): number {
+    // Tier 1: exact name match
+    if (img.itemName?.toLowerCase() === item.name.toLowerCase()) return 100;
+
+    // Tier 2: concept tag overlap (≥2 shared tags required)
+    const itemTags = extractConceptTags(
+      item.name,
+      groupMap.get(item.groupId)?.name,
+      restaurantType ?? undefined,
+    );
+    const shared = itemTags.filter((t) => img.conceptTags?.includes(t)).length;
+    if (shared >= 2) return shared * 10;
+
+    // Tier 3: category + cuisine match
+    const itemCategory = extractFoodCategory(groupMap.get(item.groupId)?.name);
+    if (
+      img.foodCategory === itemCategory &&
+      img.cuisineType === (restaurantType?.toLowerCase() || "general")
+    )
+      return 1;
+
+    return 0;
+  }
+
   function autoAssignAll() {
-    // Match library images to items by name
     for (const item of items) {
-      if (item.posImagePath) continue; // already has an image
-      const match = itemImages.find(
-        (img) =>
-          img.itemName?.toLowerCase() === item.name.toLowerCase(),
-      );
-      if (match) {
-        updateItem(item.id, { posImagePath: match.dataUri });
+      if (item.posImagePath) continue;
+      let bestImg: GeneratedImage | null = null;
+      let bestScore = 0;
+      for (const img of itemImages) {
+        const score = scoreMatch(item, img);
+        if (score > bestScore) {
+          bestScore = score;
+          bestImg = img;
+        }
+      }
+      if (bestImg && bestScore > 0) {
+        updateItem(item.id, { posImagePath: bestImg.dataUri });
       }
     }
   }
