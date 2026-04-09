@@ -756,11 +756,10 @@ export function BrandingEditor() {
                 <div className="h-2 w-2 rounded-full bg-green-500" />
                 <span className="ml-1.5 text-[9px] text-slate-600">POS Main Screen</span>
               </div>
-              {/* 1024:716 aspect ratio — sidebar is 360/1024 = 35.16% of width */}
+              {/* sidebar is 360/1024 = 35.16% of width */}
               <div
-                className="relative w-full"
+                className="relative h-48 w-full"
                 style={{
-                  aspectRatio: "1024 / 716",
                   backgroundColor: bg,
                   backgroundImage: branding.background_picture ? `url(${branding.background_picture})` : undefined,
                   backgroundSize: "cover",
