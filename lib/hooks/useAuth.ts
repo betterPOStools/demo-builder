@@ -9,14 +9,20 @@ export interface AuthState {
   loading: boolean;
 }
 
+const SKIP_AUTH = process.env.NEXT_PUBLIC_SKIP_AUTH === "true";
+
 export function useAuth(): AuthState {
   const [user, setUser] = useState<User | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!SKIP_AUTH);
 
   useEffect(() => {
+    if (SKIP_AUTH) return;
+
     const supabase = createClient();
 
+    const timeout = setTimeout(() => setLoading(false), 3000);
     supabase.auth.getUser().then(({ data }) => {
+      clearTimeout(timeout);
       setUser(data.user);
       setLoading(false);
     });
@@ -31,6 +37,7 @@ export function useAuth(): AuthState {
     return () => subscription.unsubscribe();
   }, []);
 
+  if (SKIP_AUTH) return { user: { id: "dev" } as User, loading: false };
   return { user, loading };
 }
 

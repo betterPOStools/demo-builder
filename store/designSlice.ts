@@ -27,6 +27,7 @@ export interface GeneratedImage {
   createdAt: string;
   restaurantName?: string;
   itemName?: string; // for type "item" — which menu item this was generated for
+  seamlessId?: string; // shared ID linking the sidebar+background pair from a seamless generation
   // Concept tagging for smart library reuse
   conceptTags?: string[];
   cuisineType?: string;

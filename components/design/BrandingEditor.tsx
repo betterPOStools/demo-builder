@@ -352,8 +352,9 @@ export function BrandingEditor() {
       const { sidebarPng, backgroundPng } = await splitBrandingImage(fullPng);
 
       const ts = new Date().toISOString();
-      addGeneratedImage({ id: generateId(), type: "sidebar", dataUri: sidebarPng, createdAt: ts, restaurantName: restaurantName || undefined });
-      addGeneratedImage({ id: generateId(), type: "background", dataUri: backgroundPng, createdAt: ts, restaurantName: restaurantName || undefined });
+      const seamlessId = generateId();
+      addGeneratedImage({ id: generateId(), type: "sidebar", dataUri: sidebarPng, createdAt: ts, restaurantName: restaurantName || undefined, seamlessId });
+      addGeneratedImage({ id: generateId(), type: "background", dataUri: backgroundPng, createdAt: ts, restaurantName: restaurantName || undefined, seamlessId });
       setPreview((prev) => ({ ...prev, sidebarPng, backgroundPng }));
     } catch (err) {
       console.error("Seamless generation failed:", err);
@@ -372,8 +373,9 @@ export function BrandingEditor() {
     try {
       const { sidebarPng, backgroundPng } = await splitUploadedImage(file);
       const ts = new Date().toISOString();
-      addGeneratedImage({ id: generateId(), type: "sidebar", dataUri: sidebarPng, createdAt: ts, restaurantName: restaurantName || undefined });
-      addGeneratedImage({ id: generateId(), type: "background", dataUri: backgroundPng, createdAt: ts, restaurantName: restaurantName || undefined });
+      const seamlessId = generateId();
+      addGeneratedImage({ id: generateId(), type: "sidebar", dataUri: sidebarPng, createdAt: ts, restaurantName: restaurantName || undefined, seamlessId });
+      addGeneratedImage({ id: generateId(), type: "background", dataUri: backgroundPng, createdAt: ts, restaurantName: restaurantName || undefined, seamlessId });
       setPreview((prev) => ({ ...prev, sidebarPng, backgroundPng }));
     } catch (err) {
       console.error("Image split failed:", err);
@@ -423,8 +425,22 @@ export function BrandingEditor() {
     setShowLibrary(false);
   }
 
-  const sidebarImages = imageLibrary.filter((i) => i.type === "sidebar");
-  const backgroundImages = imageLibrary.filter((i) => i.type === "background");
+  // Group library images: seamless pairs first, then standalone
+  const seamlessPairs = (() => {
+    const map = new Map<string, { sidebar?: (typeof imageLibrary)[0]; background?: (typeof imageLibrary)[0] }>();
+    for (const img of imageLibrary) {
+      if (img.seamlessId && (img.type === "sidebar" || img.type === "background")) {
+        const pair = map.get(img.seamlessId) ?? {};
+        if (img.type === "sidebar") pair.sidebar = img;
+        else pair.background = img;
+        map.set(img.seamlessId, pair);
+      }
+    }
+    return [...map.entries()].map(([id, pair]) => ({ id, ...pair }));
+  })();
+  const pairedIds = new Set(imageLibrary.filter((i) => i.seamlessId).map((i) => i.id));
+  const sidebarImages = imageLibrary.filter((i) => i.type === "sidebar" && !i.seamlessId);
+  const backgroundImages = imageLibrary.filter((i) => i.type === "background" && !i.seamlessId);
 
   return (
     <div className="space-y-4">
@@ -767,18 +783,76 @@ export function BrandingEditor() {
           </div>
 
           {/* Image Library */}
-          {imageLibrary.length > 0 && (
+          {imageLibrary.filter((i) => i.type !== "item").length > 0 && (
             <div className="space-y-2">
               <button
                 onClick={() => setShowLibrary(!showLibrary)}
                 className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-200"
               >
                 <Library className="h-3.5 w-3.5" />
-                Image Library ({imageLibrary.length})
+                Image Library ({seamlessPairs.length} seamless · {sidebarImages.length + backgroundImages.length} standalone)
               </button>
 
               {showLibrary && (
                 <div className="space-y-3 rounded-lg border border-slate-700 bg-slate-800/50 p-3">
+                  {/* Seamless pairs */}
+                  {seamlessPairs.length > 0 && (
+                    <div className="space-y-1.5">
+                      <Label className="text-[10px] text-slate-500">Seamless Pairs ({seamlessPairs.length})</Label>
+                      <div className="flex flex-wrap gap-3">
+                        {seamlessPairs.map((pair) => (
+                          <div key={pair.id} className="group relative flex gap-0.5 rounded border border-amber-700/40 bg-amber-950/20 p-1 hover:border-amber-500/60">
+                            {/* Sidebar thumbnail */}
+                            {pair.sidebar && (
+                              <div className="relative overflow-hidden rounded">
+                                <img
+                                  src={pair.sidebar.dataUri}
+                                  alt="Sidebar"
+                                  className="h-20 w-auto cursor-pointer"
+                                  title="Click to use sidebar"
+                                  onClick={() => useLibraryImage(pair.sidebar!.dataUri, "sidebar")}
+                                />
+                              </div>
+                            )}
+                            {/* Background thumbnail */}
+                            {pair.background && (
+                              <div className="relative overflow-hidden rounded">
+                                <img
+                                  src={pair.background.dataUri}
+                                  alt="Background"
+                                  className="h-20 w-auto cursor-pointer"
+                                  title="Click to use background"
+                                  onClick={() => useLibraryImage(pair.background!.dataUri, "background")}
+                                />
+                              </div>
+                            )}
+                            {/* Apply both */}
+                            <button
+                              onClick={() => {
+                                if (pair.sidebar) useLibraryImage(pair.sidebar.dataUri, "sidebar");
+                                if (pair.background) useLibraryImage(pair.background.dataUri, "background");
+                              }}
+                              className="absolute bottom-1 left-1/2 -translate-x-1/2 hidden rounded bg-amber-600/90 px-2 py-0.5 text-[9px] font-semibold text-white group-hover:block"
+                            >
+                              Use Both
+                            </button>
+                            {/* Delete pair */}
+                            <button
+                              onClick={() => {
+                                if (pair.sidebar) deleteGeneratedImage(pair.sidebar.id);
+                                if (pair.background) deleteGeneratedImage(pair.background.id);
+                              }}
+                              className="absolute right-0.5 top-0.5 hidden rounded bg-black/70 p-0.5 text-red-400 hover:text-red-300 group-hover:block"
+                            >
+                              <Trash2 className="h-2.5 w-2.5" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Standalone sidebars */}
                   {sidebarImages.length > 0 && (
                     <div className="space-y-1.5">
                       <Label className="text-[10px] text-slate-500">Sidebars ({sidebarImages.length})</Label>
@@ -790,7 +864,7 @@ export function BrandingEditor() {
                               alt=""
                               className="h-20 w-auto cursor-pointer"
                               onClick={() => useLibraryImage(img.dataUri, "sidebar")}
-                              title="Click to use · right-click to view"
+                              title="Click to use · double-click to view"
                               onDoubleClick={() => {
                                 setLightbox(sidebarImages.map((s) => ({ src: s.dataUri, name: "Sidebar" })));
                                 setLightboxIdx(i);
@@ -807,6 +881,8 @@ export function BrandingEditor() {
                       </div>
                     </div>
                   )}
+
+                  {/* Standalone backgrounds */}
                   {backgroundImages.length > 0 && (
                     <div className="space-y-1.5">
                       <Label className="text-[10px] text-slate-500">Backgrounds ({backgroundImages.length})</Label>
