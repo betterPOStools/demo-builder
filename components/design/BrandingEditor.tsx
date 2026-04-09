@@ -12,6 +12,8 @@ import {
   Library,
   Wand2,
   ScanSearch,
+  Rows2,
+  RefreshCw,
 } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -28,6 +30,17 @@ import { htmlToPng } from "@/lib/htmlToPng";
 import { splitBrandingImage, splitUploadedImage, COMBINED_W, COMBINED_H } from "@/lib/splitBrandingImage";
 
 const TRANSPARENT = "rgba(0,0,0,0)";
+
+interface CompareResult {
+  source: "replicate" | "fal" | "unsplash";
+  label: string;
+  dataUri: string | null;
+  error?: string;
+}
+interface CompareState {
+  background: CompareResult[];
+  sidebar: CompareResult[];
+}
 
 function ColorField({
   label,
@@ -167,6 +180,8 @@ export function BrandingEditor() {
   const [analyzing, setAnalyzing] = useState(false);
   const [brandTokens, setBrandTokens] = useState<Record<string, unknown> | null>(null);
   const [brandError, setBrandError] = useState("");
+  const [compareState, setCompareState] = useState<CompareState | null>(null);
+  const [comparing, setComparing] = useState(false);
 
   const bg = branding.background || "#0f172a";
   const btnBg = branding.buttons_background_color;
@@ -207,11 +222,46 @@ export function BrandingEditor() {
       });
       if (!res.ok) throw new Error("Analysis failed");
       const data = await res.json();
-      setBrandTokens(data.tokens);
+      setBrandTokens({ ...data.tokens, background_prompt: data.background_prompt, sidebar_prompt: data.sidebar_prompt });
     } catch (err) {
       setBrandError((err as Error).message);
     } finally {
       setAnalyzing(false);
+    }
+  }
+
+  async function runComparison() {
+    if (!brandTokens) return;
+    setComparing(true);
+    setCompareState(null);
+    try {
+      const keywords = [
+        ...((brandTokens.imagery_keywords as string[] | undefined) ?? []).slice(0, 2),
+        (brandTokens.industry as string) ?? "",
+      ].filter(Boolean);
+      const backgroundPrompt = (brandTokens as Record<string, unknown> & { background_prompt?: string }).background_prompt as string | undefined;
+      const sidebarPrompt = (brandTokens as Record<string, unknown> & { sidebar_prompt?: string }).sidebar_prompt as string | undefined;
+
+      const [bgRes, sbRes] = await Promise.all([
+        fetch("/api/fetch-photo", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ keywords, backgroundPrompt, sidebarPrompt, width: 1024, height: 716 }),
+        }).then(r => r.json()),
+        fetch("/api/fetch-photo", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ keywords, backgroundPrompt: sidebarPrompt, sidebarPrompt, width: 360, height: 696 }),
+        }).then(r => r.json()),
+      ]);
+      setCompareState({
+        background: bgRes.results ?? [],
+        sidebar: sbRes.results ?? [],
+      });
+    } catch (err) {
+      console.error("Comparison failed:", err);
+    } finally {
+      setComparing(false);
     }
   }
 
@@ -437,6 +487,73 @@ export function BrandingEditor() {
               <BrandTokenDisplay tokens={brandTokens} />
             )}
           </div>
+
+          {/* A/B Source Comparison — only when brand tokens are active */}
+          {brandTokens && (
+            <div className="rounded-lg border border-slate-700 bg-slate-800/50 p-3 space-y-3">
+              <div className="flex items-center justify-between">
+                <Label className="text-xs text-slate-400 flex items-center gap-1.5">
+                  <Rows2 className="h-3.5 w-3.5 text-amber-400" />
+                  Compare Sources
+                </Label>
+                <Button
+                  size="sm"
+                  onClick={runComparison}
+                  disabled={comparing}
+                  className="h-7 gap-1.5 px-3 text-xs"
+                >
+                  {comparing ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
+                  {comparing ? "Fetching…" : compareState ? "Re-run" : "Run Comparison"}
+                </Button>
+              </div>
+
+              {compareState && (
+                <div className="space-y-3">
+                  {(["background", "sidebar"] as const).map((imgType) => (
+                    <div key={imgType} className="space-y-1.5">
+                      <Label className="text-[10px] text-slate-500 capitalize">{imgType} ({imgType === "background" ? "1024×716" : "360×696"})</Label>
+                      <div className="grid grid-cols-3 gap-2">
+                        {compareState[imgType].map((result) => (
+                          <div key={result.source} className="space-y-1">
+                            <p className="text-[10px] text-slate-400 text-center truncate">{result.label}</p>
+                            {result.dataUri ? (
+                              <div
+                                className="group relative overflow-hidden rounded border border-slate-700 hover:border-blue-500/50 cursor-pointer"
+                                onClick={() => updateBranding({ [`${imgType}_picture`]: result.dataUri })}
+                              >
+                                <img
+                                  src={result.dataUri}
+                                  alt={result.label}
+                                  className="w-full object-cover"
+                                  style={{ aspectRatio: imgType === "background" ? "1024/716" : "360/696" }}
+                                />
+                                <div className="absolute inset-0 flex items-end justify-center bg-black/0 group-hover:bg-black/30 transition-all pb-1">
+                                  <span className="hidden group-hover:block text-[9px] font-semibold text-white bg-blue-600 px-2 py-0.5 rounded">Use</span>
+                                </div>
+                              </div>
+                            ) : (
+                              <div
+                                className="flex items-center justify-center rounded border border-slate-700 bg-slate-900 text-center p-2"
+                                style={{ aspectRatio: imgType === "background" ? "1024/716" : "360/696" }}
+                              >
+                                <p className="text-[9px] text-slate-500 leading-tight">{result.error ?? "No image"}</p>
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {!compareState && !comparing && (
+                <p className="text-[10px] text-slate-600">
+                  Fetches from Replicate (FLUX), fal.ai, and Unsplash using your brand tokens. Click Run to compare.
+                </p>
+              )}
+            </div>
+          )}
 
           {/* AI Generate Section */}
           <div className="rounded-lg border border-slate-700 bg-slate-800/50 p-3 space-y-2.5">
