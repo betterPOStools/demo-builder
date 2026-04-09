@@ -12,8 +12,6 @@ import {
   Library,
   Wand2,
   ScanSearch,
-  Rows2,
-  RefreshCw,
 } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -146,17 +144,6 @@ interface BrandingPreview {
   backgroundPng?: string;
 }
 
-interface CompareResult {
-  source: "fal" | "ideogram" | "unsplash";
-  label: string;
-  dataUri: string | null;
-  error?: string;
-}
-interface CompareState {
-  background: CompareResult[];
-  sidebar: CompareResult[];
-}
-
 export function BrandingEditor() {
   const branding = useStore((s) => s.branding);
   const updateBranding = useStore((s) => s.updateBranding);
@@ -181,10 +168,6 @@ export function BrandingEditor() {
   const [brandTokens, setBrandTokens] = useState<Record<string, unknown> | null>(null);
   const [brandError, setBrandError] = useState("");
 
-  // Compare Sources state
-  const [compareState, setCompareState] = useState<CompareState | null>(null);
-  const [comparing, setComparing] = useState(false);
-  const [compareTab, setCompareTab] = useState<"background" | "sidebar">("background");
 
   const bg = branding.background || "#0f172a";
   const btnBg = branding.buttons_background_color;
@@ -239,7 +222,7 @@ export function BrandingEditor() {
     const result: BrandingPreview = {};
 
     try {
-      // 1. Palette (fast)
+      // 1. Palette (fast, CSS-based)
       const paletteRes = await fetch("/api/generate-branding", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -250,47 +233,50 @@ export function BrandingEditor() {
         if (data.palette) result.palette = data.palette;
       }
 
-      // 2. Images in parallel
+      // 2. Images via fal.ai in parallel
       setGenProgress("Generating images...");
-      const [sidebarRes, bgRes] = await Promise.allSettled([
-        fetch("/api/generate-branding", {
+
+      const imageryKeywords = (brandTokens?.imagery_keywords as string[] | undefined) ?? [];
+      const textureWords = (brandTokens?.textureWords as string[] | undefined) ?? [];
+      const lightingDesc = (brandTokens?.lightingDescription as string | undefined) ?? "";
+      const keywords = [
+        ...imageryKeywords.slice(0, 3),
+        (brandTokens?.industry as string | undefined) ?? restaurantType ?? "",
+      ].filter(Boolean);
+      const backgroundPrompt = brandTokens
+        ? [lightingDesc, ...imageryKeywords.slice(0, 2), ...textureWords.slice(0, 2)].filter(Boolean).join(". ")
+        : [restaurantName, restaurantType, styleHints].filter(Boolean).join(", ") + ", atmospheric cinematic background";
+      const hasQuoteText = /"[^"]+"/.test(styleHints);
+      const sidebarPrompt = brandTokens
+        ? [lightingDesc, ...textureWords.slice(0, 2), ...imageryKeywords.slice(0, 1)].filter(Boolean).join(". ")
+        : [restaurantName, restaurantType, styleHints].filter(Boolean).join(", ") + ", atmospheric cinematic vertical";
+
+      const [bgData, sbData] = await Promise.all([
+        fetch("/api/fetch-photo", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ...payload, type: "sidebar" }),
-        }).then(async (r) => {
-          if (!r.ok) throw new Error("sidebar failed");
-          const d = await r.json();
-          const png = await htmlToPng(d.html, 360, 696);
-          addGeneratedImage({
-            id: generateId(),
-            type: "sidebar",
-            dataUri: png,
-            createdAt: new Date().toISOString(),
-            restaurantName: restaurantName || undefined,
-          });
-          return png;
-        }),
-        fetch("/api/generate-branding", {
+          body: JSON.stringify({ keywords, backgroundPrompt, assetType: "background", hasQuoteText: false, width: 1024, height: 716 }),
+        }).then((r) => r.json()),
+        fetch("/api/fetch-photo", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ...payload, type: "background" }),
-        }).then(async (r) => {
-          if (!r.ok) throw new Error("background failed");
-          const d = await r.json();
-          const png = await htmlToPng(d.html, 1024, 716);
-          addGeneratedImage({
-            id: generateId(),
-            type: "background",
-            dataUri: png,
-            createdAt: new Date().toISOString(),
-            restaurantName: restaurantName || undefined,
-          });
-          return png;
-        }),
+          body: JSON.stringify({ keywords, sidebarPrompt, assetType: "sidebar", hasQuoteText, width: 360, height: 696 }),
+        }).then((r) => r.json()),
       ]);
 
-      if (sidebarRes.status === "fulfilled") result.sidebarPng = sidebarRes.value;
-      if (bgRes.status === "fulfilled") result.backgroundPng = bgRes.value;
+      // fetch-photo returns [fal, unsplash] — take the fal result (index 0)
+      const ts = new Date().toISOString();
+      const bgUri = bgData.results?.[0]?.dataUri as string | undefined;
+      const sbUri = sbData.results?.[0]?.dataUri as string | undefined;
+
+      if (bgUri) {
+        result.backgroundPng = bgUri;
+        addGeneratedImage({ id: generateId(), type: "background", dataUri: bgUri, createdAt: ts, restaurantName: restaurantName || undefined });
+      }
+      if (sbUri) {
+        result.sidebarPng = sbUri;
+        addGeneratedImage({ id: generateId(), type: "sidebar", dataUri: sbUri, createdAt: ts, restaurantName: restaurantName || undefined });
+      }
 
       setPreview(result);
       setGenProgress("");
@@ -386,47 +372,6 @@ export function BrandingEditor() {
       updateBranding({ background_picture: dataUri });
     }
     setShowLibrary(false);
-  }
-
-  async function runComparison() {
-    if (!brandTokens) return;
-    setComparing(true);
-    setCompareState(null);
-    try {
-      const keywords = [
-        ...((brandTokens.imagery_keywords as string[] | undefined) ?? []).slice(0, 3),
-        (brandTokens.industry as string) ?? "",
-      ].filter(Boolean);
-
-      const imageryKeywords = (brandTokens.imagery_keywords as string[] | undefined) ?? [];
-      const textureWords = (brandTokens.textureWords as string[] | undefined) ?? [];
-      const lightingDesc = (brandTokens.lightingDescription as string | undefined) ?? "";
-      const backgroundPrompt = [lightingDesc, ...imageryKeywords.slice(0, 2), ...textureWords.slice(0, 2)].filter(Boolean).join(". ");
-      const sidebarPrompt = [lightingDesc, ...textureWords.slice(0, 2), ...imageryKeywords.slice(0, 1)].filter(Boolean).join(". ");
-      const hasQuoteText = /"[^"]+"/.test(styleHints);
-
-      const [bgRes, sbRes] = await Promise.all([
-        fetch("/api/fetch-photo", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ keywords, backgroundPrompt, assetType: "background", hasQuoteText: false, width: 1024, height: 716 }),
-        }).then((r) => r.json()),
-        fetch("/api/fetch-photo", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ keywords, sidebarPrompt, assetType: "sidebar", hasQuoteText, width: 360, height: 696 }),
-        }).then((r) => r.json()),
-      ]);
-
-      setCompareState({
-        background: bgRes.results ?? [],
-        sidebar: sbRes.results ?? [],
-      });
-    } catch (err) {
-      console.error("Comparison failed:", err);
-    } finally {
-      setComparing(false);
-    }
   }
 
   const sidebarImages = imageLibrary.filter((i) => i.type === "sidebar");
@@ -548,103 +493,6 @@ export function BrandingEditor() {
               Seamless: one image split across sidebar + background. Upload: use your own photo.
             </p>
           </div>
-
-          {/* Compare Sources */}
-          {brandTokens && (
-            <div className="rounded-lg border border-slate-700 bg-slate-800/50 p-3 space-y-3">
-              <div className="flex items-center justify-between">
-                <Label className="text-xs text-slate-400 flex items-center gap-1.5">
-                  <Rows2 className="h-3.5 w-3.5 text-amber-400" />
-                  Compare Sources
-                </Label>
-                <Button
-                  size="sm"
-                  onClick={runComparison}
-                  disabled={comparing}
-                  className="h-7 gap-1.5 px-3 text-xs"
-                >
-                  {comparing ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
-                  {comparing ? "Fetching…" : compareState ? "Re-run" : "Run Comparison"}
-                </Button>
-              </div>
-
-              {compareState && (
-                <div className="space-y-3">
-                  <div className="flex gap-1">
-                    {(["background", "sidebar"] as const).map((tab) => (
-                      <button
-                        key={tab}
-                        onClick={() => setCompareTab(tab)}
-                        className={`px-2.5 py-1 text-[10px] rounded font-medium transition ${
-                          compareTab === tab
-                            ? "bg-slate-600 text-white"
-                            : "text-slate-500 hover:text-slate-300"
-                        }`}
-                      >
-                        {tab === "background" ? "Background (1024×716)" : "Sidebar (360×696)"}
-                      </button>
-                    ))}
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-2">
-                    {compareState[compareTab].map((result) => (
-                      <div key={result.source} className="space-y-1">
-                        <p className="text-[10px] text-center flex items-center justify-center gap-1">
-                          {result.source === "ideogram" ? (
-                            <span className="bg-amber-500/20 text-amber-300 px-1.5 py-0.5 rounded text-[9px] font-semibold">
-                              Ideogram V3
-                            </span>
-                          ) : result.source === "fal" ? (
-                            <span className="text-blue-400 text-[10px]">FLUX Pro</span>
-                          ) : (
-                            <span className="text-slate-400 text-[10px]">{result.label}</span>
-                          )}
-                        </p>
-                        {result.dataUri ? (
-                          <div
-                            className="group relative overflow-hidden rounded border border-slate-700 hover:border-blue-500/50 cursor-pointer"
-                            onClick={() => {
-                              if (compareTab === "background") {
-                                updateBranding({ background_picture: result.dataUri! });
-                              } else {
-                                updateBranding({ sidebar_picture: result.dataUri! });
-                              }
-                            }}
-                          >
-                            <img
-                              src={result.dataUri}
-                              alt={result.label}
-                              className="w-full object-cover"
-                              style={{ aspectRatio: compareTab === "background" ? "1024/716" : "360/696" }}
-                            />
-                            <div className="absolute inset-0 flex items-end justify-center bg-black/0 group-hover:bg-black/30 transition-all pb-1">
-                              <span className="hidden group-hover:block text-[9px] font-semibold text-white bg-blue-600 px-2 py-0.5 rounded">
-                                Use
-                              </span>
-                            </div>
-                          </div>
-                        ) : (
-                          <div
-                            className="flex items-center justify-center rounded border border-slate-700 bg-slate-900 text-center p-2"
-                            style={{ aspectRatio: compareTab === "background" ? "1024/716" : "360/696" }}
-                          >
-                            <p className="text-[9px] text-slate-500 leading-tight">{result.error ?? "No image"}</p>
-                          </div>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {!compareState && !comparing && (
-                <p className="text-[10px] text-slate-600">
-                  Fetches real photos (Unsplash) and AI-generated images (FLUX Pro / Ideogram V3) using your brand tokens.
-                  Requires brand analysis above. Click Run to compare.
-                </p>
-              )}
-            </div>
-          )}
 
           {/* Preview of generated branding */}
           {preview && (
