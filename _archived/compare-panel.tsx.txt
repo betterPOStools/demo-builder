@@ -10,7 +10,7 @@
 // ── 2. Re-add interfaces (top of file, outside component) ────────────────────
 
 interface CompareResult {
-  source: "replicate" | "fal" | "unsplash";
+  source: "fal" | "ideogram" | "unsplash";
   label: string;
   dataUri: string | null;
   error?: string;
@@ -26,6 +26,7 @@ const [compareState, setCompareState] = useState<CompareState | null>(null);
 const [comparing, setComparing] = useState(false);
 
 // ── 4. Re-add runComparison() function ────────────────────────────────────────
+// NOTE: styleHints is already in scope as component state in BrandingEditor.
 
 async function runComparison() {
   if (!brandTokens) return;
@@ -36,19 +37,41 @@ async function runComparison() {
       ...((brandTokens.imagery_keywords as string[] | undefined) ?? []).slice(0, 2),
       (brandTokens.industry as string) ?? "",
     ].filter(Boolean);
-    const backgroundPrompt = (brandTokens as Record<string, unknown> & { background_prompt?: string }).background_prompt as string | undefined;
-    const sidebarPrompt = (brandTokens as Record<string, unknown> & { sidebar_prompt?: string }).sidebar_prompt as string | undefined;
+
+    // Build imagery prompts from tokens
+    const imageryKeywords = (brandTokens.imagery_keywords as string[] | undefined) ?? [];
+    const textureWords    = (brandTokens.textureWords as string[] | undefined) ?? [];
+    const lightingDesc    = (brandTokens.lightingDescription as string | undefined) ?? "";
+    const backgroundPrompt = [lightingDesc, ...imageryKeywords.slice(0, 2), ...textureWords.slice(0, 2)].filter(Boolean).join(". ");
+    const sidebarPrompt    = [lightingDesc, ...textureWords.slice(0, 2), ...imageryKeywords.slice(0, 1)].filter(Boolean).join(". ");
+
+    // hasQuoteText: true when styleHints contains a quoted string e.g. "The Keys Life"
+    const hasQuoteText = /"[^"]+"/.test(styleHints);
 
     const [bgRes, sbRes] = await Promise.all([
       fetch("/api/fetch-photo", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ keywords, backgroundPrompt, sidebarPrompt, width: 1024, height: 716 }),
+        body: JSON.stringify({
+          keywords,
+          backgroundPrompt,
+          assetType: "background",
+          hasQuoteText: false,
+          width: 1024,
+          height: 716,
+        }),
       }).then(r => r.json()),
       fetch("/api/fetch-photo", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ keywords, backgroundPrompt: sidebarPrompt, sidebarPrompt, width: 360, height: 696 }),
+        body: JSON.stringify({
+          keywords,
+          sidebarPrompt,
+          assetType: "sidebar",
+          hasQuoteText,
+          width: 360,
+          height: 696,
+        }),
       }).then(r => r.json()),
     ]);
     setCompareState({
@@ -87,11 +110,23 @@ async function runComparison() {
       <div className="space-y-3">
         {(["background", "sidebar"] as const).map((imgType) => (
           <div key={imgType} className="space-y-1.5">
-            <Label className="text-[10px] text-slate-500 capitalize">{imgType} ({imgType === "background" ? "1024×716" : "360×696"})</Label>
-            <div className="grid grid-cols-3 gap-2">
+            <Label className="text-[10px] text-slate-500 capitalize">
+              {imgType} ({imgType === "background" ? "1024×716" : "360×696"})
+            </Label>
+            <div className="grid grid-cols-2 gap-2">
               {compareState[imgType].map((result) => (
                 <div key={result.source} className="space-y-1">
-                  <p className="text-[10px] text-slate-400 text-center truncate">{result.label}</p>
+                  <p className="text-[10px] text-center truncate flex items-center justify-center gap-1">
+                    {result.source === "ideogram" ? (
+                      <span className="bg-amber-500/20 text-amber-300 px-1.5 py-0.5 rounded text-[9px] font-semibold">
+                        Ideogram V3 (text-optimized)
+                      </span>
+                    ) : result.source === "fal" ? (
+                      <span className="text-blue-400">FLUX Pro</span>
+                    ) : (
+                      <span className="text-slate-400">{result.label}</span>
+                    )}
+                  </p>
                   {result.dataUri ? (
                     <div
                       className="group relative overflow-hidden rounded border border-slate-700 hover:border-blue-500/50 cursor-pointer"
@@ -125,12 +160,14 @@ async function runComparison() {
 
     {!compareState && !comparing && (
       <p className="text-[10px] text-slate-600">
-        Fetches from Replicate (FLUX), fal.ai, and Unsplash using your brand tokens. Click Run to compare.
+        Fetches from fal.ai (FLUX Pro or Ideogram V3) and Unsplash using your brand tokens.
+        Sidebar routes to Ideogram when quote text is present in Style Hints.
+        Click Run to compare.
       </p>
     )}
   </div>
 )}
 
 // ── 6. Restore the API route ──────────────────────────────────────────────────
-//   Copy _archived/fetch-photo.route.ts → app/api/fetch-photo/route.ts
-//   Env vars needed: REPLICATE_API_TOKEN, FAL_KEY (Vercel project settings)
+//   app/api/fetch-photo/route.ts is already restored (not archived).
+//   Env var needed: FAL_KEY (set in Vercel — Development, Preview, Production)
