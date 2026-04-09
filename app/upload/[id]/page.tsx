@@ -99,6 +99,12 @@ export default function MobileUploadPage({
     if (toSend.length === 0) return;
     setSending(true);
 
+    // Prevent screen from locking while uploading — kills in-flight fetch on mobile
+    let wakeLock: WakeLockSentinel | null = null;
+    try {
+      if ("wakeLock" in navigator) wakeLock = await navigator.wakeLock.request("screen");
+    } catch { /* not supported or denied — continue anyway */ }
+
     for (const entry of toSend) {
       setStaged((prev) =>
         prev.map((e) => (e.key === entry.key ? { ...e, status: "uploading" } : e)),
@@ -124,6 +130,7 @@ export default function MobileUploadPage({
       }
     }
 
+    try { wakeLock?.release(); } catch { /* ignore */ }
     setSending(false);
   }
 
