@@ -26,32 +26,49 @@ import { isLightColor, generateId } from "@/lib/utils";
 import { htmlToPng } from "@/lib/htmlToPng";
 import { splitBrandingImage, splitUploadedImage, COMBINED_W, COMBINED_H } from "@/lib/splitBrandingImage";
 
+const TRANSPARENT = "rgba(0,0,0,0)";
+
 function ColorField({
   label,
   value,
   onChange,
+  allowTransparent,
 }: {
   label: string;
   value: string | null;
   onChange: (v: string | null) => void;
+  allowTransparent?: boolean;
 }) {
+  const isTransparent = value === TRANSPARENT;
   return (
     <div className="space-y-1">
       <Label className="text-xs">{label}</Label>
       <div className="flex items-center gap-2">
         <input
           type="color"
-          value={value || "#000000"}
+          value={isTransparent ? "#000000" : (value || "#000000")}
           onChange={(e) => onChange(e.target.value)}
           className="h-8 w-8 cursor-pointer rounded border border-slate-700"
         />
         <Input
-          value={value || ""}
+          value={isTransparent ? "transparent" : (value || "")}
           onChange={(e) => onChange(e.target.value || null)}
           placeholder="#000000"
           className="h-8 w-28 font-mono text-xs"
         />
-        {value && (
+        {allowTransparent && (
+          <button
+            onClick={() => onChange(isTransparent ? null : TRANSPARENT)}
+            className={`rounded px-1.5 py-0.5 text-[10px] font-medium transition ${
+              isTransparent
+                ? "bg-slate-500 text-white"
+                : "border border-slate-600 text-slate-400 hover:border-slate-400 hover:text-slate-200"
+            }`}
+          >
+            ⬜ Clear
+          </button>
+        )}
+        {value && !isTransparent && (
           <button
             onClick={() => onChange(null)}
             className="text-xs text-slate-500 hover:text-slate-300"
@@ -446,6 +463,7 @@ export function BrandingEditor() {
               label="Buttons Background"
               value={branding.buttons_background_color}
               onChange={(v) => updateBranding({ buttons_background_color: v })}
+              allowTransparent
             />
             <ColorField
               label="Buttons Font Color"

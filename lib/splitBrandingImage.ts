@@ -17,8 +17,8 @@ export const BG_H = 716;
 export const COMBINED_W = SIDEBAR_W + BG_W; // 1384
 export const COMBINED_H = BG_H;             // 716
 
-/** Vertical offset to center sidebar image within the combined height */
-const SIDEBAR_Y_OFFSET = Math.floor((COMBINED_H - SIDEBAR_H) / 2); // 10
+/** Vertical offset to center sidebar image within the combined height (= equal top/bottom/left margin) */
+export const SIDEBAR_Y_OFFSET = Math.floor((COMBINED_H - SIDEBAR_H) / 2); // 10
 
 export interface SplitResult {
   sidebarPng: string;
@@ -57,7 +57,12 @@ export function splitBrandingImage(fullDataUri: string): Promise<SplitResult> {
 }
 
 /**
- * Scale any user-supplied image to cover COMBINED_W × COMBINED_H, then split.
+ * Scale any user-supplied image to cover BG_W × BG_H (the background canvas),
+ * then crop the sidebar from the same image at its position within the background.
+ *
+ * The sidebar panel overlays ON TOP of the background in the POS layout,
+ * so the sidebar image must be a crop of the background — not a separate slice.
+ * Equal margin on top/bottom/left = (BG_H - SIDEBAR_H) / 2 = 10px.
  */
 export function splitUploadedImage(file: File): Promise<SplitResult> {
   return new Promise((resolve, reject) => {
@@ -66,19 +71,31 @@ export function splitUploadedImage(file: File): Promise<SplitResult> {
     img.onload = () => {
       URL.revokeObjectURL(url);
 
-      const scale = Math.max(COMBINED_W / img.width, COMBINED_H / img.height);
+      // Step 1: scale to cover the background canvas
+      const scale = Math.max(BG_W / img.width, BG_H / img.height);
       const sw = img.width * scale;
       const sh = img.height * scale;
-      const sx = (COMBINED_W - sw) / 2;
-      const sy = (COMBINED_H - sh) / 2;
+      const sx = (BG_W - sw) / 2;
+      const sy = (BG_H - sh) / 2;
 
-      const combined = document.createElement("canvas");
-      combined.width = COMBINED_W;
-      combined.height = COMBINED_H;
-      const ctx = combined.getContext("2d")!;
-      ctx.drawImage(img, sx, sy, sw, sh);
+      const bgCanvas = document.createElement("canvas");
+      bgCanvas.width = BG_W;
+      bgCanvas.height = BG_H;
+      const bgCtx = bgCanvas.getContext("2d")!;
+      bgCtx.drawImage(img, sx, sy, sw, sh);
 
-      splitBrandingImage(combined.toDataURL("image/png")).then(resolve).catch(reject);
+      // Step 2: crop sidebar from the background at its overlay position
+      const margin = SIDEBAR_Y_OFFSET; // 10px — equal top/bottom/left margin
+      const sbCanvas = document.createElement("canvas");
+      sbCanvas.width = SIDEBAR_W;
+      sbCanvas.height = SIDEBAR_H;
+      const sbCtx = sbCanvas.getContext("2d")!;
+      sbCtx.drawImage(bgCanvas, margin, margin, SIDEBAR_W, SIDEBAR_H, 0, 0, SIDEBAR_W, SIDEBAR_H);
+
+      resolve({
+        sidebarPng: sbCanvas.toDataURL("image/png"),
+        backgroundPng: bgCanvas.toDataURL("image/png"),
+      });
     };
     img.onerror = reject;
     img.src = url;
