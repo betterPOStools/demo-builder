@@ -313,18 +313,19 @@ export function BrandingEditor() {
         }).then((r) => r.json()),
       ]);
 
-      // fetch-photo returns [fal, unsplash] — take the fal result (index 0)
+      // fetch-photo returns [fal] — take the fal result (index 0)
       const ts = new Date().toISOString();
       const bgUri = bgData.results?.[0]?.dataUri as string | undefined;
       const sbUri = sbData.results?.[0]?.dataUri as string | undefined;
+      const seamlessId = (bgUri && sbUri) ? generateId() : undefined;
 
       if (bgUri) {
         result.backgroundPng = bgUri;
-        addGeneratedImage({ id: generateId(), type: "background", dataUri: bgUri, createdAt: ts, restaurantName: restaurantName || undefined });
+        addGeneratedImage({ id: generateId(), type: "background", dataUri: bgUri, createdAt: ts, restaurantName: restaurantName || undefined, seamlessId });
       }
       if (sbUri) {
         result.sidebarPng = sbUri;
-        addGeneratedImage({ id: generateId(), type: "sidebar", dataUri: sbUri, createdAt: ts, restaurantName: restaurantName || undefined });
+        addGeneratedImage({ id: generateId(), type: "sidebar", dataUri: sbUri, createdAt: ts, restaurantName: restaurantName || undefined, seamlessId });
       }
 
       setPreview(result);
@@ -339,23 +340,56 @@ export function BrandingEditor() {
 
   async function generateSeamless() {
     setGenerating(true);
-    setGenProgress("Generating seamless background...");
+    setGenProgress("Generating seamless pair...");
     try {
-      const res = await fetch("/api/generate-branding", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...payload, type: "unified" }),
-      });
-      if (!res.ok) throw new Error("Generation failed");
-      const d = await res.json();
-      const fullPng = await htmlToPng(d.html, COMBINED_W, COMBINED_H);
-      const { sidebarPng, backgroundPng } = await splitBrandingImage(fullPng);
+      const imageryKeywords = (brandTokens?.imagery_keywords as string[] | undefined) ?? [];
+      const textureWords = (brandTokens?.textureWords as string[] | undefined) ?? [];
+      const lightingDesc = (brandTokens?.lightingDescription as string | undefined) ?? "";
+      const keywords = [
+        ...imageryKeywords.slice(0, 3),
+        (brandTokens?.industry as string | undefined) ?? restaurantType ?? "",
+      ].filter(Boolean);
+      const backgroundPrompt = brandTokens
+        ? [lightingDesc, ...imageryKeywords.slice(0, 2), ...textureWords.slice(0, 2)].filter(Boolean).join(". ")
+        : [restaurantName, restaurantType, styleHints].filter(Boolean).join(", ") + ", atmospheric cinematic background";
+      const hasQuoteText = /"[^"]+"/.test(styleHints);
+      const sidebarPrompt = brandTokens
+        ? [lightingDesc, ...textureWords.slice(0, 2), ...imageryKeywords.slice(0, 1)].filter(Boolean).join(". ")
+        : [restaurantName, restaurantType, styleHints].filter(Boolean).join(", ") + ", atmospheric cinematic vertical";
+      const quoteMatch = styleHints.match(/"([^"]+)"/);
+      const quoteText = quoteMatch?.[1];
+
+      const [bgData, sbData] = await Promise.all([
+        fetch("/api/fetch-photo", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ keywords, backgroundPrompt, assetType: "background", hasQuoteText: false, brandTokens, width: 1024, height: 716 }),
+        }).then((r) => r.json()),
+        fetch("/api/fetch-photo", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ keywords, sidebarPrompt, assetType: "sidebar", hasQuoteText, quoteText, brandTokens, width: 360, height: 696 }),
+        }).then((r) => r.json()),
+      ]);
+
+      const bgUri = bgData.results?.[0]?.dataUri as string | undefined;
+      const sbUri = sbData.results?.[0]?.dataUri as string | undefined;
+
+      if (!bgUri && !sbUri) throw new Error("No images returned from fal");
 
       const ts = new Date().toISOString();
       const seamlessId = generateId();
-      addGeneratedImage({ id: generateId(), type: "sidebar", dataUri: sidebarPng, createdAt: ts, restaurantName: restaurantName || undefined, seamlessId });
-      addGeneratedImage({ id: generateId(), type: "background", dataUri: backgroundPng, createdAt: ts, restaurantName: restaurantName || undefined, seamlessId });
-      setPreview((prev) => ({ ...prev, sidebarPng, backgroundPng }));
+      if (sbUri) {
+        addGeneratedImage({ id: generateId(), type: "sidebar", dataUri: sbUri, createdAt: ts, restaurantName: restaurantName || undefined, seamlessId });
+      }
+      if (bgUri) {
+        addGeneratedImage({ id: generateId(), type: "background", dataUri: bgUri, createdAt: ts, restaurantName: restaurantName || undefined, seamlessId });
+      }
+      setPreview((prev) => ({
+        ...prev,
+        ...(sbUri ? { sidebarPng: sbUri } : {}),
+        ...(bgUri ? { backgroundPng: bgUri } : {}),
+      }));
     } catch (err) {
       console.error("Seamless generation failed:", err);
     } finally {
