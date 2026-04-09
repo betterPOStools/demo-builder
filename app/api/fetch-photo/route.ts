@@ -232,10 +232,17 @@ export async function POST(request: Request) {
       height,
     } = body;
 
+    const bgPromptBase =
+      (brandTokens?.flux_scene_prompt as string | undefined) ||
+      backgroundPrompt ||
+      keywords.join(", ");
+    const bgPromptFinal =
+      `${bgPromptBase} Compose with the main subject and focal interest in the right 70% of the frame — the leftmost 30% will be covered by a sidebar panel.`;
+
     const falResult =
       assetType === "background"
         ? fetchFalBackground(
-            (brandTokens?.flux_scene_prompt as string | undefined) || backgroundPrompt || keywords.join(", "),
+            bgPromptFinal,
             width,
             height,
             brandTokens?.negative_prompt as string | undefined,

@@ -259,7 +259,8 @@ function buildBackgroundPrompt(
 
   return `${lightPhrase} Surfaces: ${texturePhrase}. ${sceneLine}${asymNote}
 
-CANVAS: 1024px wide × 716px tall. POS terminal main screen — UI buttons overlay the center zone.
+CANVAS: 1024px wide × 716px tall. POS terminal main screen.
+COMPOSITION: the left 31% of this canvas (~318px) is permanently covered by a sidebar panel. Place the main focal point, richest atmosphere, and key visual interest in the RIGHT 69% of the frame. The left zone should carry supporting texture and shadow that blends into the main scene — not its own focal point. Do NOT center the composition across the full 1024px width.
 
 OUTPUT: A <style> block followed immediately by one root <div class="bg-root">. Nothing else.
 
@@ -514,6 +515,8 @@ export async function POST(request: Request) {
       brandTokens?: Record<string, unknown>;
     };
 
+    console.log("=== GENERATE-BRANDING RECEIVES ===", JSON.stringify({ brandTokens }, null, 2));
+
     // Extract quoted display title from styleHints (e.g. "The Keys Life")
     const titleMatch   = styleHints?.match(/"([^"]+)"/);
     const displayTitle = titleMatch?.[1]?.trim() ?? null;
@@ -534,6 +537,12 @@ export async function POST(request: Request) {
 
     // Use brand tokens if provided, otherwise empty object (fallbackContext fills the gap)
     const tokens: Record<string, unknown> = brandTokens ?? {};
+    console.log("=== TOKEN COLORS ===", JSON.stringify({
+      color_palette: tokens?.color_palette,
+      colors: tokens?.colors,
+      primary: tokens?.primary,
+      full_tokens: JSON.stringify(tokens).slice(0, 500)
+    }, null, 2));
 
     // ── Palette ──────────────────────────────────────────────────────────────
     if (type === "palette") {
@@ -581,11 +590,13 @@ Rules:
     if (type === "unified") {
       const prompt = buildUnifiedPrompt(tokens, displayTitle, fallbackContext);
 
+      const messages = [{ role: "user" as const, content: prompt }];
+      console.log("=== PROMPT SENT TO MODEL ===\n", JSON.stringify(messages, null, 2));
       const msg = await client.messages.create({
         model: "claude-sonnet-4-6",
         max_tokens: 8192,
         system: SYSTEM_PROMPT,
-        messages: [{ role: "user", content: prompt }],
+        messages,
       });
 
       const text    = msg.content[0].type === "text" ? msg.content[0].text : "";
@@ -606,11 +617,13 @@ Rules:
     if (type === "sidebar") {
       const prompt = buildSidebarPrompt(tokens, displayTitle, fallbackContext);
 
+      const messages = [{ role: "user" as const, content: prompt }];
+      console.log("=== PROMPT SENT TO MODEL ===\n", JSON.stringify(messages, null, 2));
       const msg = await client.messages.create({
         model: "claude-sonnet-4-6",
         max_tokens: 8192,
         system: SYSTEM_PROMPT,
-        messages: [{ role: "user", content: prompt }],
+        messages,
       });
 
       const text     = msg.content[0].type === "text" ? msg.content[0].text : "";
@@ -630,11 +643,13 @@ Rules:
     // ── Background (default) ──────────────────────────────────────────────────
     const prompt = buildBackgroundPrompt(tokens, fallbackContext);
 
+    const messages = [{ role: "user" as const, content: prompt }];
+    console.log("=== PROMPT SENT TO MODEL ===\n", JSON.stringify(messages, null, 2));
     const msg = await client.messages.create({
       model: "claude-sonnet-4-6",
       max_tokens: 8192,
       system: SYSTEM_PROMPT,
-      messages: [{ role: "user", content: prompt }],
+      messages,
     });
 
     const text     = msg.content[0].type === "text" ? msg.content[0].text : "";

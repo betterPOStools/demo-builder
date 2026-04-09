@@ -771,7 +771,7 @@ export function BrandingEditor() {
                 {/* Sidebar — 360/1024 wide, 696/716 tall, 3px from edges */}
                 <div
                   className="absolute bg-[#0a0f1a]"
-                  style={{ left: 3, top: 3, bottom: 3, width: "35.16%" }}
+                  style={{ left: 3, top: 3, bottom: 3, width: "31%" }}
                 >
                   {branding.sidebar_picture ? (
                     <img src={branding.sidebar_picture} alt="" className="h-full w-full object-cover" />
