@@ -25,6 +25,26 @@ function buildRichContext(t: Record<string, unknown>): string {
     .join("\n");
 }
 
+// Builds a mandatory CSS color directive from brand tokens.
+// This wires actual hex values into the prompt so Claude can't default to generic dark navy.
+function buildCSSColorDirective(t: Record<string, unknown>): string {
+  const p = (t.color_palette as Record<string, string>) ?? {};
+  const base = p.background || "#0d1b2a";
+  const primary = p.primary || "#1a4d6e";
+  const secondary = p.secondary || "#2a6080";
+  const accent = p.accent || "#e8a838";
+
+  return `
+MANDATORY CSS COLOR IMPLEMENTATION — use these exact hex values, no substitutions:
+- Root background: linear-gradient(135deg, ${base} 0%, ${primary} 60%, ${secondary} 100%)
+- Bloom div 1 (top-left, 700px circle): background: radial-gradient(circle, ${accent}99 0%, ${accent}00 70%)
+- Bloom div 2 (bottom-right, 650px circle): background: radial-gradient(circle, ${primary}cc 0%, ${primary}00 70%)
+- Bloom div 3 (top-right, 500px circle): background: radial-gradient(circle, ${accent}66 0%, ${accent}00 65%)
+- Bloom div 4 (bottom-left, 550px circle): background: radial-gradient(circle, ${secondary}aa 0%, ${secondary}00 70%)
+The accent color (${accent}) MUST be clearly visible — it is the brightest element on canvas.
+Do NOT use rgba(0,0,0,...) or near-black colors for the bloom divs.`;
+}
+
 export async function POST(request: Request) {
   try {
     const { restaurantName, restaurantType, groups, type, styleHints, brandTokens } =
@@ -121,7 +141,7 @@ Rules:
       const unifiedPrompt = `You are an expert CSS visual designer. Create a single seamless full-screen background for a restaurant POS terminal.
 
 ${context}
-${brandTokens ? "\nBRAND ANALYSIS: Use the specific colors, textures, and imagery keywords above as the foundation. The color palette is derived from actual brand analysis — use those exact hex values as the basis for gradient colors." : ""}
+${brandTokens ? buildCSSColorDirective(brandTokens) : ""}
 CANVAS: exactly 1384px wide × 716px tall. Rasterized to PNG, then split:
 - LEFT 360px  → sidebar strip (portrait, decorative chrome)
 - RIGHT 1024px → main background (POS buttons and menu items sit on top)
@@ -207,7 +227,7 @@ DESIGN:
       const sidebarPrompt = `You are an expert CSS visual designer. Create a richly layered sidebar banner for a restaurant POS terminal.
 
 ${context}
-${brandTokens ? "\nBRAND ANALYSIS: Use the specific brand colors and imagery keywords above. Be bold and vivid — this is the showcase panel." : ""}
+${brandTokens ? buildCSSColorDirective(brandTokens) : ""}
 CANVAS: exactly 360px wide × 696px tall. Rasterized to PNG by html2canvas.
 
 OUTPUT: Return a <style> block followed immediately by a single root <div>. No JSON, no markdown — raw HTML only.
@@ -264,7 +284,7 @@ DESIGN:
     const backgroundPrompt = `You are an expert CSS visual designer. Create a soft, cinematic background for a restaurant POS terminal's main screen.
 
 ${context}
-${brandTokens ? "\nBRAND ANALYSIS: Use the specific colors, textures, and imagery keywords above as the foundation. The color palette is derived from actual brand analysis — use those exact hex values as the basis for gradient colors." : ""}
+${brandTokens ? buildCSSColorDirective(brandTokens) : ""}
 CANVAS: exactly 1024px wide × 716px tall. Rasterized to PNG by html2canvas.
 
 OUTPUT: Return a <style> block followed immediately by a single root <div>. No JSON, no markdown — raw HTML only.
