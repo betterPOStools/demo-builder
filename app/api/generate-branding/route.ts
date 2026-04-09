@@ -141,7 +141,7 @@ DESIGN:
 - Root: <div class="u-root"> — width:1384px; height:716px; overflow:hidden; position:relative
 - NO hard clip-path polygon shapes; use radial gradients and border-radius:50% blobs only
 - 6–10 child divs: base gradient + color bloom divs + center-clear overlay + vignette
-- What you generate is exactly what renders — no additional dimming applied at runtime
+- What you generate is exactly what renders — no additional dimming applied at runtime`;
 
       const msg = await client.messages.create({
         model: "claude-sonnet-4-6",
