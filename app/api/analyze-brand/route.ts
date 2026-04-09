@@ -72,14 +72,20 @@ const TOKEN_SCHEMA = `{
   "textures": [1-3 words, e.g. "wood grain", "marble", "glass"],
   "imagery_keywords": [3-5 short visual phrases usable in image generation prompts],
   "lighting_style": [1-2 descriptors, e.g. "soft ambient", "golden hour", "neon glow"],
-  "composition_style": [1-2 descriptors, e.g. "layered depth", "clean minimal"]
+  "composition_style": [1-2 descriptors, e.g. "layered depth", "clean minimal"],
+  "textureWords": [2-4 short physical material descriptors that could be surfaces — e.g. "weathered cedar", "rough-cast plaster", "woven linen", "river stone"],
+  "lightingDescription": string (one sentence describing light quality and direction — e.g. "Late afternoon sun raking at a low angle across rough surfaces, casting long warm shadows"),
+  "dominantAtmosphere": exactly one of: "warm" | "cool" | "neutral" | "dramatic" | "soft"
 }`;
 
 const DRAMATIC_INSTRUCTION = `
 After extracting, internally enhance the tokens to be more visually dramatic and suitable for high-impact POS demo backgrounds:
 - Increase contrast in mood and style descriptors
 - Make imagery_keywords more cinematic and vivid (e.g. "coastal dock" → "weathered dock pilings at golden hour, bokeh water reflections")
-- Keep them aligned with the original brand identity but amplify them for visual impact
+- For textureWords: describe physical surfaces you can touch — grain, roughness, temperature. Be specific (not "rustic" but "rough-hewn cedar plank" or "cracked terracotta").
+- For lightingDescription: describe WHERE the light comes from, its COLOR temperature, and what SHADOWS it casts. One evocative sentence.
+- For dominantAtmosphere: choose the single word that best captures the overall emotional register.
+- Keep all enhancements aligned with the original brand identity.
 `;
 
 async function extractTokensFromText(text: string): Promise<object> {
@@ -93,6 +99,10 @@ async function extractTokensFromText(text: string): Promise<object> {
 
 ${TOKEN_SCHEMA}
 ${DRAMATIC_INSTRUCTION}
+
+For textureWords: infer physical materials from the cuisine type, brand name, and any visual language used on the site. A seafood restaurant implies weathered dock wood, sea-worn rope, raw oyster shell. An Italian trattoria implies worn terracotta, linen tablecloth, rough stone wall. Be specific and tactile.
+For lightingDescription: infer from the cuisine's natural environment and time-of-day associations. A rooftop bar suggests golden hour sun. A dim sum restaurant suggests warm lantern light. Write one evocative sentence.
+For dominantAtmosphere: based on the overall brand personality and cuisine.
 
 WEBSITE CONTENT:
 ${text}
@@ -126,7 +136,11 @@ async function extractTokensFromImage(
 ${TOKEN_SCHEMA}
 ${DRAMATIC_INSTRUCTION}
 
-Focus on: dominant colors, textures visible, lighting quality, mood/atmosphere, visual style.
+Extraction focus:
+- color_palette: sample the dominant dark tone for background, the most prominent mid-tone for primary, a vibrant supporting tone for secondary, the brightest accent color for accent
+- textureWords: describe the physical surfaces and materials you can actually see or strongly infer — be specific and tactile (e.g. "smoked cedar planks", "poured concrete counter", "woven seagrass")
+- lightingDescription: describe exactly where the light comes from, its color temperature (warm/cool/neutral), and what shadows or highlights it creates. One vivid sentence.
+- dominantAtmosphere: the single emotional register of the image
 Return ONLY the JSON object, no markdown, no explanation.`,
           },
         ],
@@ -138,45 +152,6 @@ Return ONLY the JSON object, no markdown, no explanation.`,
     .replace(/```\n?/g, "")
     .trim();
   return JSON.parse(raw);
-}
-
-// ── Prompt builders ───────────────────────────────────────────────────────────
-
-function buildBackgroundPrompt(t: Record<string, unknown>): string {
-  const palette = (t.color_palette as Record<string, string>) ?? {};
-  const mood = (t.mood as string[] ?? []).join(", ");
-  const style = (t.visual_style as string[] ?? []).join(", ");
-  const lighting = (t.lighting_style as string[] ?? []).join(", ");
-  const textures = (t.textures as string[] ?? []).join(", ");
-  const keywords = (t.imagery_keywords as string[] ?? []).join("; ");
-  const composition = (t.composition_style as string[] ?? []).join(", ");
-
-  return (
-    `Cinematic POS background for ${t.brand_name ?? "restaurant"} (${t.industry ?? "dining"}). ` +
-    `Color story: ${palette.primary} primary, ${palette.accent} accent, deep ${palette.background} base. ` +
-    `Mood: ${mood}. Visual style: ${style}. ` +
-    `Lighting: ${lighting}. Textures to suggest: ${textures}. ` +
-    `Composition: ${composition}. ` +
-    `Key imagery to evoke (blurred, atmospheric): ${keywords}. ` +
-    `Center area kept dark and low-contrast for UI readability. Soft color blooms at edges and corners. ` +
-    `Cinematic shallow depth-of-field. No text, no faces, no sharp subjects.`
-  );
-}
-
-function buildSidebarPrompt(t: Record<string, unknown>): string {
-  const palette = (t.color_palette as Record<string, string>) ?? {};
-  const mood = (t.mood as string[] ?? []).join(", ");
-  const style = (t.visual_style as string[] ?? []).join(", ");
-  const keywords = (t.imagery_keywords as string[] ?? []).slice(0, 3).join("; ");
-
-  return (
-    `Vertical sidebar panel for ${t.brand_name ?? "restaurant"} POS (${t.industry ?? "dining"}). ` +
-    `Bold brand colors: ${palette.primary} and ${palette.accent} on ${palette.background} base. ` +
-    `Style: ${style}. Mood: ${mood}. ` +
-    `Rich, saturated vertical composition — this is the visual showcase strip. ` +
-    `Imagery: ${keywords}. ` +
-    `High contrast, brand-forward, geometric depth. Narrow portrait format (360×696).`
-  );
 }
 
 // ── Route ─────────────────────────────────────────────────────────────────────
@@ -224,11 +199,7 @@ export async function POST(request: Request) {
     // Override brand name if restaurant name is known
     if (restaurantName) tokens.brand_name = restaurantName;
 
-    return Response.json({
-      tokens,
-      background_prompt: buildBackgroundPrompt(tokens),
-      sidebar_prompt: buildSidebarPrompt(tokens),
-    });
+    return Response.json({ tokens });
   } catch (err: unknown) {
     return Response.json({ error: (err as Error).message }, { status: 500 });
   }
