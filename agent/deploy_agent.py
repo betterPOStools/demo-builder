@@ -142,6 +142,7 @@ def execute_sql(sql, deploy_target=None):
     conn = mysql.connector.connect(
         host=host, port=port, user=user, password=password,
         database=database, autocommit=False,
+        connection_timeout=10,
     )
     cursor = conn.cursor()
     total_rows = 0
@@ -327,14 +328,27 @@ def restart_pos(host, user=None, db_name=None):
     # Ensure VBS launcher exists (hidden cmd window)
     ensure_restart_script(host, user)
 
-    # Launch via PsExec into interactive session 1, elevated
+    # Detect the active console session ID dynamically (may be 1, 2, etc.)
+    session_id = 1
+    ok_q, qout, _ = ssh_cmd(host, "query session", user=user, timeout=10)
+    if ok_q:
+        for line in qout.splitlines():
+            if "active" in line.lower() and "console" in line.lower():
+                parts = line.split()
+                for part in parts:
+                    if part.isdigit():
+                        session_id = int(part)
+                        break
+    print(f"  [POS] Using interactive session {session_id}")
+
+    # Launch via PsExec into the active interactive session, elevated
     # VBS wrapper hides the cmd window; --no-sandbox allows GPU from remote session
-    launch_cmd = f'{PSEXEC_PATH} -accepteula -i 1 -h -d wscript.exe C:\\restart_pos.vbs'
+    launch_cmd = f'{PSEXEC_PATH} -accepteula -i {session_id} -h -d C:\\Windows\\System32\\wscript.exe C:\\restart_pos.vbs'
     ok, out, err = ssh_cmd(host, launch_cmd, user=user, timeout=15)
     # PsExec writes to stderr even on success; check for "started on"
     combined = (out + " " + err).lower()
     if "started on" in combined:
-        print(f"  [POS] Launched POS via PsExec (session 1, elevated, --no-sandbox)")
+        print(f"  [POS] Launched POS via PsExec (session {session_id}, elevated, --no-sandbox)")
         result["pos_restarted"] = True
     else:
         result["error"] = f"PsExec launch failed: {err[:200]}"
