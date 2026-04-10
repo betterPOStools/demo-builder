@@ -5,9 +5,6 @@ import { newUuid, nowStr, esc, price, generateTemplateSql } from "./generator";
 import { generateRoomSql, generateTableSql } from "./layout";
 import type { RoomDef, TableDef } from "./layout";
 import type { ParsedItem, ParsedModifierTemplate, GroupMeta } from "./designParser";
-import type { PendingImageTransfer } from "@/lib/types/deploy";
-
-export type { PendingImageTransfer };
 
 function deriveDestPath(imageUrl: string, name: string): string {
   try {
@@ -19,6 +16,14 @@ function deriveDestPath(imageUrl: string, name: string): string {
   }
   const safe = name.replace(/[^a-zA-Z0-9_\-]/g, "_");
   return `${safe}.png`;
+}
+
+export interface PendingImageTransfer {
+  type: "item" | "group" | "branding";
+  name: string;
+  entityId: string | undefined;
+  imageUrl: string;  // HTTP URL or data: URI
+  destPath: string;
 }
 
 export interface DeploymentResult {
@@ -251,9 +256,9 @@ export function generateFullDeployment(opts: {
       pendingImageTransfers.push({
         type: "item",
         name: item.name,
-        entity_id: iid,
-        image_url: item.image_path,
-        dest_path: destPath,
+        entityId: iid,
+        imageUrl: item.image_path,
+        destPath,
       });
       itemPicSql = `'${esc(destPath)}'`;
     } else if (item.image_path) {
@@ -376,9 +381,9 @@ export function generateFullDeployment(opts: {
       pendingImageTransfers.push({
         type: "branding",
         name: "Background Image",
-        entity_id: undefined,
-        image_url: bgPicture,
-        dest_path: destPath,
+        entityId: undefined,
+        imageUrl: bgPicture,
+        destPath,
       });
       storeRows.push(["Background", destPath]);
     } else if (bg) {
@@ -410,9 +415,9 @@ export function generateFullDeployment(opts: {
         pendingImageTransfers.push({
           type: "branding",
           name: "Sidebar Image",
-          entity_id: undefined,
-          image_url: sidebar,
-          dest_path: sidebarPath,
+          entityId: undefined,
+          imageUrl: sidebar,
+          destPath: sidebarPath,
         });
       }
 
@@ -442,9 +447,9 @@ export function generateFullDeployment(opts: {
       pendingImageTransfers.push({
         type: "item",
         name: item.name,
-        entity_id: itemIds[item.name],
-        image_url: item.image_url,
-        dest_path: item.image_path || deriveDestPath(item.image_url, item.name),
+        entityId: itemIds[item.name],
+        imageUrl: item.image_url,
+        destPath: item.image_path || deriveDestPath(item.image_url, item.name),
       });
     }
   }
@@ -454,9 +459,9 @@ export function generateFullDeployment(opts: {
       pendingImageTransfers.push({
         type: "group",
         name: groupName,
-        entity_id: groupIds[groupName],
-        image_url: gmeta.image_url,
-        dest_path:
+        entityId: groupIds[groupName],
+        imageUrl: gmeta.image_url,
+        destPath:
           gmeta.image_path || deriveDestPath(gmeta.image_url, groupName),
       });
     }

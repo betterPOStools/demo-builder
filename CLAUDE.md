@@ -10,7 +10,8 @@ Unified POS pipeline app: Extract menus → Design templates → Deploy to Maria
 - **DnD:** @dnd-kit/core + sortable
 - **AI:** Anthropic SDK (Haiku 4.5 text, Sonnet 4.6 vision)
 - **Image rendering:** html2canvas (branding), SVG-to-PNG (item icons)
-- **Database:** Supabase PostgreSQL (`demo_builder` schema)
+- **Database:** Turso (LibSQL/SQLite) — migrated from Supabase 2026-04-10
+- **File storage:** Vercel Blob (replaces Supabase Storage)
 - **Hosting:** Vercel
 
 ## Dev Commands
@@ -45,7 +46,7 @@ Data flows through Zustand store:
 1. Extraction produces `MenuRow[]` + modifier suggestions
 2. `parseMenuRows()` converts to `ImportedMenuItem[]` → creates `GroupNode[]` + `ItemNode[]`
 3. `serializeDesignConfig()` produces `DesignConfigV2` → SQL generation
-4. SQL staged in Supabase → local deploy agent executes against MariaDB
+4. SQL staged in Turso → local deploy agent polls and executes against MariaDB
 
 ## Key Features
 
@@ -57,7 +58,7 @@ Data flows through Zustand store:
 
 ### Deploy Agent (`agent/deploy_agent.py`)
 - Runs as launchd service: `com.valuesystems.demo-builder-agent`
-- Polls Supabase `demo_builder.sessions` for `deploy_status = "queued"` every 10s
+- Polls Turso `sessions` table for `deploy_status = "queued"` every 5s via HTTP API
 - Executes SQL via `mysql.connector` against MariaDB deploy target
 - Pushes images via SCP: data URIs decoded via `base64.b64decode()`, URLs via `requests.get()`
 - POS image dirs: `C:\Program Files\Pecan Solutions\Pecan POS\images\{Food,Background,Sidebar}\`
@@ -72,7 +73,7 @@ Data flows through Zustand store:
 - Cleanup DELETEs must include FK-dependent tables in order: `menuforcedmodifierlevelmodifiers` → `menuforcedmodifierlevels` → `menumodifiertemplateitemprefixes` → `menumodifiertemplateitems` → `menumodifiertemplatesections` → `menumodifiertemplates`
 
 ### Connections
-- Saved connections stored in `demo_builder.connections` table via `/api/connections`
+- Saved connections stored in Turso `connections` table via `/api/connections`
 - Active connection selected on deploy page → used as `deploy_target` in staged session
 - Connection test: `POST /api/connections/test`
 
@@ -82,11 +83,32 @@ Data flows through Zustand store:
 - `../template-builder/` — Source for design types, reducer logic, serializer
 - `../pos-scaffold/` — Source for SQL generation, MariaDB deployer
 
-## Supabase
+## Database (Turso)
 
-- Schema: `demo_builder`
-- Tables: `sessions`, `usage_logs`, `connections`
-- Project: same shared instance as other suite apps
-- `sessions.generated_sql` — full SQL blob staged for agent
-- `sessions.pending_images` — JSON array of `{ name, imageUrl, destPath }` (data URIs or HTTP URLs)
-- `sessions.deploy_target` — `{ host, port, database, user, password }` or null (agent uses defaults)
+Migrated from Supabase to Turso (LibSQL) on 2026-04-10. Supabase PROD became unresponsive.
+
+- **URL:** `libsql://demo-builder-db-betterpostools.aws-us-east-1.turso.io`
+- **Client:** `lib/turso.ts` — shared `turso` client + `parseJson`/`toJson` helpers
+- **Tables:**
+  - `sessions` — project sessions: `generated_sql`, `pending_images TEXT` (JSON), `deploy_target TEXT` (JSON), `deploy_status`, `deploy_result TEXT` (JSON)
+  - `connections` — saved MariaDB targets
+- `sessions.pending_images` — JSON array of `{ name, image_url, dest_path }` (**snake_case** — critical, agent reads these field names)
+- `sessions.deploy_target` — `{ host, port, database, user, password }` or null
+
+## Vercel Blob
+
+Images uploaded to Vercel Blob before staging to Turso. Stage route (`app/api/deploy/stage/route.ts`) converts data URIs to Blob URLs. If Blob upload fails, data URI is stored directly in Turso as fallback.
+
+- Token: `BLOB_READ_WRITE_TOKEN` (set in `.env.local` and Vercel project)
+- Path pattern: `deploy/{sessionId}/{imageName}.{ext}`
+
+## Auth
+
+`NEXT_PUBLIC_SKIP_AUTH=true` bypasses auth entirely (set in `.env.local` and Vercel production). Full auth TBD.
+
+## Migration Notes (2026-04-10)
+
+- All API routes rewritten to use `@libsql/client`
+- Deploy agent updated to poll Turso HTTP API (`/v2/pipeline`) — URL must use `https://` not `libsql://`
+- `PendingImageTransfer` fields are snake_case throughout (`image_url`, `dest_path`, `entity_id`) — camelCase was a silent bug that broke image deploys
+- Full migration log: `/Users/nomad/Projects/app-suite-docs/SUPABASE_TO_TURSO_MIGRATION.md`

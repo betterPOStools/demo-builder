@@ -144,31 +144,3 @@ export function splitFromDataUri(dataUri: string): Promise<SplitResult> {
     img.src = dataUri;
   });
 }
-
-/**
- * Normalize any image data URI to exactly SIDEBAR_W × SIDEBAR_H using
- * scale-to-cover + center crop. Used to fit Ideogram/FLUX sidebar generations
- * (which come back at the model's native dimensions) into the POS sidebar
- * panel without distortion.
- */
-export function fitToSidebar(dataUri: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => {
-      const scale = Math.max(SIDEBAR_W / img.width, SIDEBAR_H / img.height);
-      const sw = img.width * scale;
-      const sh = img.height * scale;
-      const sx = (SIDEBAR_W - sw) / 2;
-      const sy = (SIDEBAR_H - sh) / 2;
-
-      const canvas = document.createElement("canvas");
-      canvas.width = SIDEBAR_W;
-      canvas.height = SIDEBAR_H;
-      const ctx = canvas.getContext("2d")!;
-      ctx.drawImage(img, sx, sy, sw, sh);
-      resolve(canvas.toDataURL("image/png"));
-    };
-    img.onerror = reject;
-    img.src = dataUri;
-  });
-}

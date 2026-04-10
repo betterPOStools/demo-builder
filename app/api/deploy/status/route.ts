@@ -1,4 +1,6 @@
-import { turso } from "@/lib/turso";
+// Poll deploy status for a session
+
+import { createServerClient } from "@/lib/supabase/server";
 
 export async function GET(request: Request) {
   const url = new URL(request.url);
@@ -8,20 +10,28 @@ export async function GET(request: Request) {
     return Response.json({ error: "Missing sessionId" }, { status: 400 });
   }
 
-  const result = await turso.execute({
-    sql: "SELECT deploy_status, deploy_result FROM sessions WHERE id = ? LIMIT 1",
-    args: [sessionId],
+  const supabase = createServerClient();
+  const { data, error } = await supabase
+    .from("sessions")
+    .select("deploy_status, deploy_result")
+    .eq("id", sessionId)
+    .single();
+
+  if (error) {
+    return Response.json(
+      { error: `Session not found: ${error.message}` },
+      { status: 404 },
+    );
+  }
+
+  // deploy_result is stored as a JSON string by the agent — parse it
+  let result = data.deploy_result;
+  if (typeof result === "string") {
+    try { result = JSON.parse(result); } catch { /* leave as-is */ }
+  }
+
+  return Response.json({
+    status: data.deploy_status,
+    result,
   });
-
-  if (result.rows.length === 0) {
-    return Response.json({ error: "Session not found" }, { status: 404 });
-  }
-
-  const row = result.rows[0];
-  let deployResult = row.deploy_result;
-  if (typeof deployResult === "string") {
-    try { deployResult = JSON.parse(deployResult); } catch { /* leave as-is */ }
-  }
-
-  return Response.json({ status: row.deploy_status, result: deployResult });
 }

@@ -1,4 +1,4 @@
-import { turso, parseJson, toJson } from "@/lib/turso";
+import { createServerClient } from "@/lib/supabase/server";
 
 // GET /api/sessions/:id — load a session
 export async function GET(
@@ -7,50 +7,47 @@ export async function GET(
 ) {
   try {
     const { id } = await params;
-    const result = await turso.execute({
-      sql: "SELECT * FROM sessions WHERE id = ? LIMIT 1",
-      args: [id],
-    });
+    const supabase = createServerClient();
+    const { data, error } = await supabase
+      .from("sessions")
+      .select("*")
+      .eq("id", id)
+      .single();
 
-    if (result.rows.length === 0) return Response.json({ session: null });
+    if (error) {
+      if (error.code === "PGRST116") {
+        return Response.json({ session: null });
+      }
+      return Response.json({ error: error.message }, { status: 500 });
+    }
 
-    const r = result.rows[0];
-    const session = {
-      id: r.id,
-      name: r.name,
-      restaurant_name: r.restaurant_name,
-      restaurant_type: r.restaurant_type,
-      current_step: r.current_step,
-      extracted_rows: parseJson(r.extracted_rows, []),
-      modifier_suggestions: parseJson(r.modifier_suggestions, []),
-      design_state: parseJson(r.design_state, {}),
-      modifier_templates: parseJson(r.modifier_templates, []),
-      generated_sql: r.generated_sql,
-      pending_images: parseJson(r.pending_images, []),
-      deploy_target: parseJson(r.deploy_target, null),
-      deploy_status: r.deploy_status,
-      deploy_result: r.deploy_result,
-      created_at: r.created_at,
-      updated_at: r.updated_at,
-    };
-
-    return Response.json({ session });
+    return Response.json({ session: data });
   } catch (error: unknown) {
-    return Response.json({ error: (error as Error).message }, { status: 500 });
+    return Response.json(
+      { error: (error as Error).message },
+      { status: 500 },
+    );
   }
 }
 
-// DELETE /api/sessions/:id
+// DELETE /api/sessions/:id — delete a session
 export async function DELETE(
   _request: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
   try {
     const { id } = await params;
-    await turso.execute({ sql: "DELETE FROM sessions WHERE id = ?", args: [id] });
+    const supabase = createServerClient();
+    const { error } = await supabase.from("sessions").delete().eq("id", id);
+    if (error) {
+      return Response.json({ error: error.message }, { status: 500 });
+    }
     return Response.json({ ok: true });
   } catch (error: unknown) {
-    return Response.json({ error: (error as Error).message }, { status: 500 });
+    return Response.json(
+      { error: (error as Error).message },
+      { status: 500 },
+    );
   }
 }
 
@@ -62,41 +59,36 @@ export async function PUT(
   try {
     const { id } = await params;
     const body = await request.json();
-    const now = new Date().toISOString();
 
-    await turso.execute({
-      sql: `INSERT INTO sessions
-              (id, name, restaurant_name, restaurant_type, current_step,
-               extracted_rows, modifier_suggestions, design_state, modifier_templates,
-               created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-              name=excluded.name,
-              restaurant_name=excluded.restaurant_name,
-              restaurant_type=excluded.restaurant_type,
-              current_step=excluded.current_step,
-              extracted_rows=excluded.extracted_rows,
-              modifier_suggestions=excluded.modifier_suggestions,
-              design_state=excluded.design_state,
-              modifier_templates=excluded.modifier_templates,
-              updated_at=excluded.updated_at`,
-      args: [
-        id,
-        body.name || "Untitled",
-        body.restaurant_name ?? null,
-        body.restaurant_type ?? null,
-        body.current_step ?? 1,
-        toJson(body.extracted_rows),
-        toJson(body.modifier_suggestions),
-        toJson(body.design_state),
-        toJson(body.modifier_templates),
-        now,
-        now,
-      ],
-    });
+    const supabase = createServerClient();
+    const { error } = await supabase
+      .from("sessions")
+      .upsert(
+        {
+          id,
+          user_email: body.user_email || "aaron@valuesystemspos.com",
+          name: body.name || "Untitled",
+          restaurant_name: body.restaurant_name || null,
+          restaurant_type: body.restaurant_type || null,
+          extracted_rows: body.extracted_rows || null,
+          modifier_suggestions: body.modifier_suggestions || null,
+          design_state: body.design_state || null,
+          modifier_templates: body.modifier_templates || null,
+          current_step: body.current_step ?? 1,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: "id" },
+      );
+
+    if (error) {
+      return Response.json({ error: error.message }, { status: 500 });
+    }
 
     return Response.json({ ok: true });
   } catch (error: unknown) {
-    return Response.json({ error: (error as Error).message }, { status: 500 });
+    return Response.json(
+      { error: (error as Error).message },
+      { status: 500 },
+    );
   }
 }

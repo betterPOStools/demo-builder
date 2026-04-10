@@ -5,29 +5,32 @@ const client = new Anthropic();
 
 export const maxDuration = 60;
 
-// ─── fal.ai — Recraft V3 icon ─────────────────────────────────────────────────
+// ─── fal.ai — FLUX Schnell (primary) ─────────────────────────────────────────
 
-async function generateViaRecraft(
+async function generateViaFal(
   itemName: string,
   groupName?: string,
   restaurantType?: string,
   styleHints?: string,
-  recraftStyle: "vector_illustration" | "digital_illustration" = "vector_illustration",
+  negativePrompt?: string,
 ): Promise<string> {
   const falKey = process.env.FAL_KEY;
   if (!falKey) throw new Error("FAL_KEY not set");
 
-  // Keep the prompt tight — Recraft's icon style responds better to concise,
-  // noun-focused descriptions. Adding too much context pulls it toward
-  // illustration territory instead of clean icon output.
-  const category = groupName ? ` ${groupName.toLowerCase()}` : "";
-  const extra = styleHints ? `, ${styleHints}` : "";
-  const prompt =
-    `${itemName}${category}, vector illustration, clean bold shapes, ` +
-    `vivid colors, centered composition, transparent background, ` +
-    `no text, no labels${extra}`;
+  const context = [
+    restaurantType && `${restaurantType} restaurant`,
+    groupName && `${groupName} category`,
+  ]
+    .filter(Boolean)
+    .join(", ");
 
-  const res = await fetch("https://fal.run/fal-ai/recraft-v3", {
+  const style = styleHints ? `, ${styleHints}` : "";
+  const prompt =
+    `Food photography of ${itemName}` +
+    (context ? `, ${context}` : "") +
+    `, clean neutral dark background, studio lighting, appetizing close-up, square composition, no text, no labels${style}`;
+
+  const res = await fetch("https://fal.run/fal-ai/flux/schnell", {
     method: "POST",
     headers: {
       Authorization: `Key ${falKey}`,
@@ -35,21 +38,22 @@ async function generateViaRecraft(
     },
     body: JSON.stringify({
       prompt,
-      style: recraftStyle,
+      ...(negativePrompt ? { negative_prompt: negativePrompt } : {}),
       image_size: { width: 512, height: 512 },
-      output_format: "png", // PNG preserves the alpha/transparency channel
+      num_inference_steps: 4,
+      safety_tolerance: "5",
     }),
-    signal: AbortSignal.timeout(45000),
+    signal: AbortSignal.timeout(30000),
   });
 
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`Recraft HTTP ${res.status}: ${text.slice(0, 200)}`);
+    throw new Error(`fal HTTP ${res.status}: ${text.slice(0, 200)}`);
   }
 
   const data = (await res.json()) as { images?: { url: string }[] };
   const imageUrl = data.images?.[0]?.url;
-  if (!imageUrl) throw new Error("No image URL in Recraft response");
+  if (!imageUrl) throw new Error("No image URL in fal response");
 
   // Download and convert to data URI
   const imgRes = await fetch(imageUrl, { signal: AbortSignal.timeout(15000) });
@@ -114,13 +118,12 @@ Return ONLY the SVG code, no explanation.`,
 
 export async function POST(request: Request) {
   try {
-    const { itemName, groupName, restaurantType, styleHints, recraftStyle } =
+    const { itemName, groupName, restaurantType, styleHints } =
       (await request.json()) as {
         itemName: string;
         groupName?: string;
         restaurantType?: string;
         styleHints?: string;
-        recraftStyle?: "vector_illustration" | "digital_illustration";
       };
 
     if (!itemName) {
@@ -131,20 +134,20 @@ export async function POST(request: Request) {
     const foodCategory = extractFoodCategory(groupName);
     const cuisineType = restaurantType?.toLowerCase() || "general";
 
-    // Try Recraft V3 first, fall back to Claude SVG
+    // Try fal first, fall back to Claude SVG
     try {
-      const dataUri = await generateViaRecraft(itemName, groupName, restaurantType, styleHints, recraftStyle);
+      const dataUri = await generateViaFal(itemName, groupName, restaurantType, styleHints);
       return Response.json({
         dataUri,
         itemName,
-        source: "recraft",
+        source: "fal",
         conceptTags,
         foodCategory,
         cuisineType,
         generatedFor: undefined,
       });
-    } catch (recraftErr) {
-      console.warn("Recraft generation failed, falling back to Claude SVG:", (recraftErr as Error).message);
+    } catch (falErr) {
+      console.warn("fal generation failed, falling back to Claude SVG:", (falErr as Error).message);
     }
 
     // Claude SVG fallback

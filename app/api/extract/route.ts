@@ -16,14 +16,51 @@ import {
   MENU_SYSTEM_PROMPT,
   EXTENDED_MENU_SYSTEM_PROMPT,
 } from "@/lib/extraction/prompts";
+import { createServerClient } from "@/lib/supabase/server";
+
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 export const maxDuration = 300; // Vercel Fluid Compute
 
-// Usage logging removed (Supabase replaced by Turso; cost tracking is a future todo)
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-async function logUsage(_params: unknown) {
-  // no-op
+// ---------------------------------------------------------------------------
+// Usage logging — writes to demo_builder.usage_logs
+// ---------------------------------------------------------------------------
+async function logUsage(params: {
+  model: string;
+  sourceType: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens?: number;
+  rows: number;
+  durationMs: number;
+  ok: boolean;
+  error?: string;
+  sessionId?: string;
+}) {
+  try {
+    const supabase = createServerClient();
+    // Approximate cost: Haiku ~$0.80/M in, $4/M out; Sonnet ~$3/M in, $15/M out
+    const isHaiku = params.model.includes("haiku");
+    const inRate = isHaiku ? 0.8 / 1_000_000 : 3 / 1_000_000;
+    const outRate = isHaiku ? 4 / 1_000_000 : 15 / 1_000_000;
+    const cacheRate = inRate * 0.1; // cache reads are 10% of input cost
+    const cost =
+      params.inputTokens * inRate +
+      params.outputTokens * outRate +
+      (params.cacheReadTokens ?? 0) * cacheRate;
+
+    await supabase.from("usage_logs").insert({
+      session_id: params.sessionId ?? null,
+      model: params.model,
+      source_type: params.sourceType,
+      input_tokens: params.inputTokens,
+      output_tokens: params.outputTokens,
+      cache_read_tokens: params.cacheReadTokens ?? 0,
+      cost,
+    });
+  } catch {
+    // Never let logging failures break extraction
+  }
 }
 
 // ---------------------------------------------------------------------------

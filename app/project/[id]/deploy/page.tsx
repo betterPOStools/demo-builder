@@ -33,7 +33,6 @@ import { ConnectionForm } from "@/components/deploy/ConnectionForm";
 import { ConnectionStatus } from "@/components/deploy/ConnectionStatus";
 import { toast } from "sonner";
 import type { SavedConnection } from "@/lib/types";
-import { compressPendingImages } from "@/lib/compressImages";
 
 export default function DeployPage({
   params,
@@ -247,9 +246,6 @@ export default function DeployPage({
           }
         : undefined;
 
-      const pendingImages = await compressPendingImages(
-        freshSql.pendingImageTransfers || [],
-      );
       const res = await fetch("/api/deploy/stage", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -257,7 +253,7 @@ export default function DeployPage({
           sessionId: id,
           sql: freshSql.sql,
           stats: freshSql.stats,
-          pendingImages,
+          pendingImages: freshSql.pendingImageTransfers || [],
           deployTarget,
         }),
       });
