@@ -488,6 +488,13 @@ def main():
 
     while True:
         process_queued()
+        # Update heartbeat on the matching connection record
+        try:
+            supabase_patch("connections", {"host": f"eq.{DB_HOST}"}, {
+                "agent_last_seen": datetime.now(timezone.utc).isoformat(),
+            })
+        except Exception:
+            pass
         time.sleep(POLL_INTERVAL)
 
 
