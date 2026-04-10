@@ -269,9 +269,8 @@ def ensure_restart_script(host, user=None):
     # Create via SCP from a temp file
     import tempfile as _tf
     vbs = (
-        'Set WshShell = CreateObject("WScript.Shell")\n'
-        'WshShell.Run "cmd /c cd /d ""C:\\Program Files\\Pecan Solutions\\Pecan POS"""'
-        ' && ""Pecan POS.exe"" --no-sandbox", 0, False\n'
+        'Set WshShell = CreateObject("WScript.Shell")\r\n'
+        'WshShell.Run "cmd /c cd /d ""C:\\Program Files\\Pecan Solutions\\Pecan POS"" && ""Pecan POS.exe"" --no-sandbox", 0, False\r\n'
     )
     with _tf.NamedTemporaryFile(mode="w", suffix=".vbs", delete=False) as f:
         f.write(vbs)
