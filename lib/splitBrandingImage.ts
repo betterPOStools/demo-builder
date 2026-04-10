@@ -58,12 +58,8 @@ export function splitBrandingImage(fullDataUri: string): Promise<SplitResult> {
 
 /**
  * Scale any user-supplied image to cover COMBINED_W × COMBINED_H, then split.
- * Applies a dark overlay on the background half so POS buttons remain readable.
  */
-export function splitUploadedImage(
-  file: File,
-  bgDarkness = 0.55,
-): Promise<SplitResult> {
+export function splitUploadedImage(file: File): Promise<SplitResult> {
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(file);
     const img = new Image();
@@ -82,12 +78,6 @@ export function splitUploadedImage(
       combined.height = COMBINED_H;
       const ctx = combined.getContext("2d")!;
       ctx.drawImage(img, sx, sy, sw, sh);
-
-      // Dark overlay on the background half so POS UI stays readable
-      ctx.save();
-      ctx.fillStyle = `rgba(0,0,0,${bgDarkness})`;
-      ctx.fillRect(SIDEBAR_W, 0, BG_W, COMBINED_H);
-      ctx.restore();
 
       splitBrandingImage(combined.toDataURL("image/png")).then(resolve).catch(reject);
     };
