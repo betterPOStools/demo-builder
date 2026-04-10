@@ -10,8 +10,8 @@ Unified POS pipeline app: Extract menus → Design templates → Deploy to Maria
 - **DnD:** @dnd-kit/core + sortable
 - **AI:** Anthropic SDK (Haiku 4.5 text, Sonnet 4.6 vision)
 - **Image rendering:** html2canvas (branding), SVG-to-PNG (item icons)
-- **Database:** Turso (LibSQL/SQLite) — migrated from Supabase 2026-04-10
-- **File storage:** Vercel Blob (replaces Supabase Storage)
+- **Database:** Supabase DEV (`mqifktmmyiqzrolrvsmy`), schema `demo_builder`
+- **File storage:** Vercel Blob
 - **Hosting:** Vercel
 
 ## Dev Commands
@@ -46,7 +46,7 @@ Data flows through Zustand store:
 1. Extraction produces `MenuRow[]` + modifier suggestions
 2. `parseMenuRows()` converts to `ImportedMenuItem[]` → creates `GroupNode[]` + `ItemNode[]`
 3. `serializeDesignConfig()` produces `DesignConfigV2` → SQL generation
-4. SQL staged in Turso → local deploy agent polls and executes against MariaDB
+4. SQL staged in Supabase → local deploy agent polls and executes against MariaDB
 
 ## Key Features
 
@@ -58,7 +58,7 @@ Data flows through Zustand store:
 
 ### Deploy Agent (`agent/deploy_agent.py`)
 - Runs as launchd service: `com.valuesystems.demo-builder-agent`
-- Polls Turso `sessions` table for `deploy_status = "queued"` every 5s via HTTP API
+- Polls Supabase `demo_builder.sessions` for `deploy_status = "queued"` every 5s via REST API
 - Executes SQL via `mysql.connector` against MariaDB deploy target
 - Pushes images via SCP: data URIs decoded via `base64.b64decode()`, URLs via `requests.get()`
 - POS image dirs: `C:\Program Files\Pecan Solutions\Pecan POS\images\{Food,Background,Sidebar}\`
@@ -73,7 +73,7 @@ Data flows through Zustand store:
 - Cleanup DELETEs must include FK-dependent tables in order: `menuforcedmodifierlevelmodifiers` → `menuforcedmodifierlevels` → `menumodifiertemplateitemprefixes` → `menumodifiertemplateitems` → `menumodifiertemplatesections` → `menumodifiertemplates`
 
 ### Connections
-- Saved connections stored in Turso `connections` table via `/api/connections`
+- Saved connections stored in Supabase `demo_builder.connections` table via `/api/connections`
 - Active connection selected on deploy page → used as `deploy_target` in staged session
 - Connection test: `POST /api/connections/test`
 
@@ -83,32 +83,30 @@ Data flows through Zustand store:
 - `../template-builder/` — Source for design types, reducer logic, serializer
 - `../pos-scaffold/` — Source for SQL generation, MariaDB deployer
 
-## Database (Turso)
+## Database (Supabase)
 
-Migrated from Supabase to Turso (LibSQL) on 2026-04-10. Supabase PROD became unresponsive.
+Uses Supabase DEV project (`mqifktmmyiqzrolrvsmy`), schema `demo_builder`.
+Supabase PROD (`nngjtbrvwhjrmbokephl`) went down 2026-04-10 — oversized JSONB upsert (~300–600KB base64 images) hit statement timeout. Turso was attempted as replacement but was unreachable on the demo location network — rolled back to Supabase DEV same day.
 
-- **URL:** `libsql://demo-builder-db-betterpostools.aws-us-east-1.turso.io`
-- **Client:** `lib/turso.ts` — shared `turso` client + `parseJson`/`toJson` helpers
-- **Tables:**
-  - `sessions` — project sessions: `generated_sql`, `pending_images TEXT` (JSON), `deploy_target TEXT` (JSON), `deploy_status`, `deploy_result TEXT` (JSON)
+- **Client (server):** `lib/supabase/server.ts` — uses service role key, includes `{ db: { schema: "demo_builder" } }`
+- **Client (browser):** `lib/supabase/client.ts` — uses anon key, **NO schema override** (auth breaks if schema override is present)
+- **Agent:** polls via Supabase REST API with `Accept-Profile: demo_builder` + `Content-Profile: demo_builder` headers
+- **Tables (schema `demo_builder`):**
+  - `sessions` — project sessions: `generated_sql`, `pending_images JSONB`, `deploy_target JSONB`, `deploy_status`, `deploy_result JSONB`
   - `connections` — saved MariaDB targets
 - `sessions.pending_images` — JSON array of `{ name, image_url, dest_path }` (**snake_case** — critical, agent reads these field names)
 - `sessions.deploy_target` — `{ host, port, database, user, password }` or null
+- **Image payload fix:** Stage route uploads data URIs to Vercel Blob before upserting to Supabase — stores URL (~100 bytes) not raw base64 (~60KB). Prevents JSONB statement timeout.
 
 ## Vercel Blob
 
-Images uploaded to Vercel Blob before staging to Turso. Stage route (`app/api/deploy/stage/route.ts`) converts data URIs to Blob URLs. If Blob upload fails, data URI is stored directly in Turso as fallback.
+Stage route (`app/api/deploy/stage/route.ts`) converts data URIs to Blob URLs before Supabase upsert. If Blob upload fails, data URI is stored directly as fallback.
 
 - Token: `BLOB_READ_WRITE_TOKEN` (set in `.env.local` and Vercel project)
 - Path pattern: `deploy/{sessionId}/{imageName}.{ext}`
 
 ## Auth
 
-`NEXT_PUBLIC_SKIP_AUTH=true` bypasses auth entirely (set in `.env.local` and Vercel production). Full auth TBD.
+`NEXT_PUBLIC_SKIP_AUTH=true` bypasses auth entirely (baked into client bundle at build time — must be set in Vercel env vars, not just `.env.local`). Email auth for `aaronneece@gmail.com` is configured in Supabase DEV `auth.users` + `auth.identities`.
 
-## Migration Notes (2026-04-10)
-
-- All API routes rewritten to use `@libsql/client`
-- Deploy agent updated to poll Turso HTTP API (`/v2/pipeline`) — URL must use `https://` not `libsql://`
-- `PendingImageTransfer` fields are snake_case throughout (`image_url`, `dest_path`, `entity_id`) — camelCase was a silent bug that broke image deploys
-- Full migration log: `/Users/nomad/Projects/app-suite-docs/SUPABASE_TO_TURSO_MIGRATION.md`
+**Critical:** Never add `{ db: { schema: "demo_builder" } }` to the browser Supabase client (`lib/supabase/client.ts`). Auth operations (`signInWithPassword` etc.) use the `public` schema and will return "Database error querying schema" if a schema override is present. Only server-side clients should have the schema override.
