@@ -1,5 +1,5 @@
 /**
- * Split a combined 1384×716 branding image into sidebar + background pieces.
+ * Split branding images into sidebar + background pieces.
  *
  * POS layout (left→right):
  *   Sidebar panel : 360px wide, image padded with equal margin top/bottom/left
@@ -16,9 +16,7 @@ export const BG_W = 1024;
 export const BG_H = 716;
 export const COMBINED_W = SIDEBAR_W + BG_W; // 1384
 export const COMBINED_H = BG_H;             // 716
-
-/** Vertical offset to center sidebar image within the combined height */
-const SIDEBAR_Y_OFFSET = Math.floor((COMBINED_H - SIDEBAR_H) / 2); // 10
+export const SIDEBAR_Y_OFFSET = Math.floor((COMBINED_H - SIDEBAR_H) / 2); // 10
 
 export interface SplitResult {
   sidebarPng: string;
@@ -26,7 +24,7 @@ export interface SplitResult {
 }
 
 /**
- * Crop a PNG data URI (must be COMBINED_W × COMBINED_H) into the two POS assets.
+ * Crop a 1384×716 combined image into sidebar (left 360×696) + background (right 1024×716).
  */
 export function splitBrandingImage(fullDataUri: string): Promise<SplitResult> {
   return new Promise((resolve, reject) => {
@@ -53,6 +51,38 @@ export function splitBrandingImage(fullDataUri: string): Promise<SplitResult> {
     };
     img.onerror = reject;
     img.src = fullDataUri;
+  });
+}
+
+/**
+ * Seamless split: derive sidebar by cropping the left edge of a BG_W×BG_H image.
+ * Both sidebar and background come from the same fal-generated image — no second call needed.
+ */
+export function splitFromBackground(bgDataUri: string): Promise<SplitResult> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      // Background: scale-fill to BG_W × BG_H
+      const bgCanvas = document.createElement("canvas");
+      bgCanvas.width = BG_W;
+      bgCanvas.height = BG_H;
+      const bgCtx = bgCanvas.getContext("2d")!;
+      bgCtx.drawImage(img, 0, 0, BG_W, BG_H);
+
+      // Sidebar: crop left SIDEBAR_W × SIDEBAR_H from the background, vertically centred
+      const sbCanvas = document.createElement("canvas");
+      sbCanvas.width = SIDEBAR_W;
+      sbCanvas.height = SIDEBAR_H;
+      const sbCtx = sbCanvas.getContext("2d")!;
+      sbCtx.drawImage(bgCanvas, 0, SIDEBAR_Y_OFFSET, SIDEBAR_W, SIDEBAR_H, 0, 0, SIDEBAR_W, SIDEBAR_H);
+
+      resolve({
+        sidebarPng: sbCanvas.toDataURL("image/png"),
+        backgroundPng: bgCanvas.toDataURL("image/png"),
+      });
+    };
+    img.onerror = reject;
+    img.src = bgDataUri;
   });
 }
 

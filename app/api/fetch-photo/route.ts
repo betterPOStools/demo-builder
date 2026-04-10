@@ -213,7 +213,7 @@ export async function POST(request: Request) {
       keywords: string[];
       backgroundPrompt?: string;
       sidebarPrompt?: string;
-      assetType: "background" | "sidebar" | "combined";
+      assetType: "background" | "sidebar" | "seamless";
       hasQuoteText?: boolean;
       quoteText?: string;
       brandTokens?: Record<string, unknown>;
@@ -239,16 +239,13 @@ export async function POST(request: Request) {
 
     let falResult: Promise<CompareResult>;
 
-    if (assetType === "combined") {
-      // One panoramic 1384×716 image — sidebar (left 360px) + background (right 1024px) from same scene.
-      // Sidebar takes the left portion so prompt should place ambient/atmospheric content on the left
-      // and main focal subject toward center-right.
-      const combinedPrompt =
-        `${bgPromptBase} Wide panoramic composition: atmospheric ambient textures on the left third, main focal subject centered to right. No text, no UI elements.`;
+    if (assetType === "seamless") {
+      // Full-frame composition — no focal bias. Sidebar will be cropped from the left edge client-side.
+      const seamlessPrompt = `${bgPromptBase} Full cinematic composition filling the entire frame. No text, no UI elements.`;
       falResult = fetchFalBackground(
-        combinedPrompt,
-        width,  // 1384
-        height, // 716
+        seamlessPrompt,
+        width,
+        height,
         brandTokens?.negative_prompt as string | undefined,
       );
     } else if (assetType === "background") {

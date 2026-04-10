@@ -26,7 +26,7 @@ import { useStore } from "@/store";
 import type { SavedBrandAnalysis } from "@/store/designSlice";
 import { isLightColor, generateId } from "@/lib/utils";
 import { htmlToPng } from "@/lib/htmlToPng";
-import { splitBrandingImage, splitUploadedImage, COMBINED_W, COMBINED_H } from "@/lib/splitBrandingImage";
+import { splitBrandingImage, splitFromBackground, splitUploadedImage } from "@/lib/splitBrandingImage";
 
 const TRANSPARENT = "rgba(0,0,0,0)";
 
@@ -353,25 +353,28 @@ export function BrandingEditor() {
         ? [lightingDesc, ...imageryKeywords.slice(0, 2), ...textureWords.slice(0, 2)].filter(Boolean).join(". ")
         : [restaurantName, restaurantType, styleHints].filter(Boolean).join(", ") + ", atmospheric cinematic panoramic";
 
-      // Generate ONE combined 1384×716 panoramic image — then split into sidebar + background
+      // Generate ONE full-frame 1024×716 image — crop sidebar from its left edge client-side
       const data = await fetch("/api/fetch-photo", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           keywords,
           backgroundPrompt,
-          assetType: "combined",
+          assetType: "seamless",
           brandTokens,
-          width: COMBINED_W,  // 1384
-          height: COMBINED_H, // 716
+          width: 1024,
+          height: 716,
         }),
       }).then((r) => r.json());
 
-      const combinedUri = data.results?.[0]?.dataUri as string | undefined;
-      if (!combinedUri) throw new Error("No image returned from fal");
+      const bgUri = data.results?.[0]?.dataUri as string | undefined;
+      if (!bgUri) {
+        const err = data.results?.[0]?.error as string | undefined;
+        throw new Error(err || "No image returned from fal");
+      }
 
       setGenProgress("Splitting into sidebar + background...");
-      const { sidebarPng, backgroundPng } = await splitBrandingImage(combinedUri);
+      const { sidebarPng, backgroundPng } = await splitFromBackground(bgUri);
 
       const ts = new Date().toISOString();
       const seamlessId = generateId();
