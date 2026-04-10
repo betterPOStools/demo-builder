@@ -1,10 +1,12 @@
 export const maxDuration = 60;
 
 interface CompareResult {
-  source: "fal" | "ideogram" | "unsplash";
+  source: "fal" | "unsplash";
   label: string;
   dataUri: string | null;
   error?: string;
+  /** When true, the client must composite quote text onto this sidebar image. */
+  needsTextComposite?: boolean;
 }
 
 // ─── Unsplash ─────────────────────────────────────────────────────────────────
@@ -108,7 +110,12 @@ async function fetchFalBackground(
   }
 }
 
-// ─── fal.ai — sidebar (Ideogram V3 with text, FLUX Pro without) ───────────────
+// ─── fal.ai — sidebar (FLUX Pro background only) ─────────────────────────────
+//
+// We no longer ask the image model to render quote text. fal generates a
+// plain vertical texture sized for the sidebar panel; if the caller signals
+// hasQuoteText=true we flag the result with `needsTextComposite` so the
+// client can draw the quote on top via Canvas (see lib/compositeQuoteOnImage).
 
 async function fetchFalSidebar(
   prompt: string,
@@ -119,89 +126,50 @@ async function fetchFalSidebar(
   const falKey = process.env.FAL_KEY;
   if (!falKey) {
     return {
-      source: hasQuoteText ? "ideogram" : "fal",
-      label: hasQuoteText ? "fal.ai (Ideogram V3)" : "fal.ai (FLUX Pro)",
+      source: "fal",
+      label: "fal.ai (FLUX Pro)",
       dataUri: null,
       error: "Add FAL_KEY to Vercel env vars",
     };
   }
 
-  if (hasQuoteText) {
-    // Ideogram V3 — renders text accurately in images
-    try {
-      const res = await fetch("https://fal.run/fal-ai/ideogram/v3", {
-        method: "POST",
-        headers: {
-          Authorization: `Key ${falKey}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          prompt,
-          aspect_ratio: "1:2",
-          rendering_speed: "QUALITY",
-          style_type: "REALISTIC",
-        }),
-        signal: AbortSignal.timeout(55000),
-      });
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
-      }
-      const data = (await res.json()) as { images?: { url: string }[] };
-      const imageUrl = data.images?.[0]?.url;
-      if (!imageUrl) throw new Error("No image URL in Ideogram V3 response");
-      return {
-        source: "ideogram",
-        label: "fal.ai (Ideogram V3)",
-        dataUri: await downloadToDataUri(imageUrl),
-      };
-    } catch (e) {
-      return {
-        source: "ideogram",
-        label: "fal.ai (Ideogram V3)",
-        dataUri: null,
-        error: (e as Error).message,
-      };
+  try {
+    const res = await fetch("https://fal.run/fal-ai/flux-pro/v1.1", {
+      method: "POST",
+      headers: {
+        Authorization: `Key ${falKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        prompt,
+        image_size: { width, height },
+        num_inference_steps: 28,
+        guidance_scale: 3.5,
+        num_images: 1,
+        safety_tolerance: "5",
+      }),
+      signal: AbortSignal.timeout(55000),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
     }
-  } else {
-    // No text — use FLUX Pro at sidebar dimensions
-    try {
-      const res = await fetch("https://fal.run/fal-ai/flux-pro/v1.1", {
-        method: "POST",
-        headers: {
-          Authorization: `Key ${falKey}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          prompt,
-          image_size: { width, height },
-          num_inference_steps: 28,
-          guidance_scale: 3.5,
-          num_images: 1,
-          safety_tolerance: "5",
-        }),
-        signal: AbortSignal.timeout(55000),
-      });
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
-      }
-      const data = (await res.json()) as { images?: { url: string }[] };
-      const imageUrl = data.images?.[0]?.url;
-      if (!imageUrl) throw new Error("No image URL in fal.ai FLUX Pro response");
-      return {
-        source: "fal",
-        label: "fal.ai (FLUX Pro)",
-        dataUri: await downloadToDataUri(imageUrl),
-      };
-    } catch (e) {
-      return {
-        source: "fal",
-        label: "fal.ai (FLUX Pro)",
-        dataUri: null,
-        error: (e as Error).message,
-      };
-    }
+    const data = (await res.json()) as { images?: { url: string }[] };
+    const imageUrl = data.images?.[0]?.url;
+    if (!imageUrl) throw new Error("No image URL in fal.ai FLUX Pro response");
+    return {
+      source: "fal",
+      label: "fal.ai (FLUX Pro)",
+      dataUri: await downloadToDataUri(imageUrl),
+      ...(hasQuoteText ? { needsTextComposite: true } : {}),
+    };
+  } catch (e) {
+    return {
+      source: "fal",
+      label: "fal.ai (FLUX Pro)",
+      dataUri: null,
+      error: (e as Error).message,
+    };
   }
 }
 
@@ -215,7 +183,6 @@ export async function POST(request: Request) {
       sidebarPrompt?: string;
       assetType: "background" | "sidebar" | "seamless";
       hasQuoteText?: boolean;
-      quoteText?: string;
       brandTokens?: Record<string, unknown>;
       width: number;
       height: number;
@@ -226,7 +193,6 @@ export async function POST(request: Request) {
       sidebarPrompt,
       assetType,
       hasQuoteText = false,
-      quoteText,
       brandTokens,
       width,
       height,
@@ -258,16 +224,12 @@ export async function POST(request: Request) {
         brandTokens?.negative_prompt as string | undefined,
       );
     } else {
-      // sidebar
+      // sidebar — always FLUX Pro. If hasQuoteText, the client will composite
+      // the quote onto the returned image via lib/compositeQuoteOnImage.
       falResult = fetchFalSidebar(
-        hasQuoteText
-          ? ((brandTokens?.ideogram_sidebar_prompt as string | undefined)
-              ? (brandTokens!.ideogram_sidebar_prompt as string).replace(
-                  "[QUOTE_PLACEHOLDER]",
-                  quoteText ?? "",
-                )
-              : sidebarPrompt || keywords.join(", "))
-          : ((brandTokens?.flux_sidebar_prompt as string | undefined) || sidebarPrompt || keywords.join(", ")),
+        (brandTokens?.flux_sidebar_prompt as string | undefined) ||
+          sidebarPrompt ||
+          keywords.join(", "),
         width,
         height,
         hasQuoteText,

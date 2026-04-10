@@ -13,6 +13,7 @@ import { useExtraction } from "@/lib/extraction/useExtraction";
 import { parseMenuRows } from "@/lib/menuImport";
 import { serializeDesignConfig } from "@/lib/serializer";
 import { svgToPng } from "@/lib/svgToPng";
+import { compressPendingImages } from "@/lib/compressImages";
 import { htmlToPng } from "@/lib/htmlToPng";
 import { splitBrandingImage, COMBINED_W, COMBINED_H } from "@/lib/splitBrandingImage";
 import type { ModifierTemplateNode, ModifierSectionNode, ModifierNode } from "@/lib/types";
@@ -366,6 +367,9 @@ export function useAutoPilot() {
             }
           : undefined;
 
+        const pendingImages = await compressPendingImages(
+          sqlData.pendingImageTransfers ?? [],
+        );
         const stageRes = await fetch("/api/deploy/stage", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -373,7 +377,7 @@ export function useAutoPilot() {
             sessionId,
             sql: sqlData.sql,
             stats: sqlData.stats,
-            pendingImages: sqlData.pendingImageTransfers ?? [],
+            pendingImages,
             deployTarget,
           }),
         });

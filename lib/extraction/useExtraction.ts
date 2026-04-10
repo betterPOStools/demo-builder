@@ -3,6 +3,7 @@
 import { useCallback } from "react";
 import { useStore } from "@/store";
 import { toast } from "sonner";
+import { generateId } from "@/lib/utils";
 
 const MAX_CONCURRENT = 3;
 
@@ -23,7 +24,7 @@ export function useExtraction() {
     setProcessing(true);
     const isFirstExtraction = useStore.getState().extractedRows.length === 0;
     const isBatch = pending.length > 1;
-    const batchId = isBatch ? crypto.randomUUID() : undefined;
+    const batchId = isBatch ? generateId() : undefined;
 
     let firstDone = false;
 
@@ -135,7 +136,7 @@ export function useExtraction() {
       // so we override via a direct store call
       const state = useStore.getState();
       const entry = {
-        id: crypto.randomUUID(),
+        id: generateId(),
         file: placeholder,
         name: url,
         type: "url",

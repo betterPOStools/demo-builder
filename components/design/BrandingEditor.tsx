@@ -12,6 +12,9 @@ import {
   Library,
   Wand2,
   ScanSearch,
+  ChevronDown,
+  ChevronUp,
+  ImageIcon,
 } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -31,6 +34,7 @@ import {
   splitFromBackground,
   splitFromDataUri,
   splitUploadedImage,
+  fitToSidebar,
   BG_W,
   BG_H,
   SIDEBAR_W,
@@ -38,6 +42,8 @@ import {
   SIDEBAR_X_OFFSET,
   SIDEBAR_Y_OFFSET,
 } from "@/lib/splitBrandingImage";
+import { compositeQuoteOnImage } from "@/lib/compositeQuoteOnImage";
+import { LogoSidebarGenerator } from "@/components/design/LogoSidebarGenerator";
 
 // POS overlay-model percentages — keep in sync with POSPreview.tsx
 const SIDEBAR_LEFT_PCT = (SIDEBAR_X_OFFSET / BG_W) * 100;
@@ -46,6 +52,34 @@ const SIDEBAR_W_PCT = (SIDEBAR_W / BG_W) * 100;
 const SIDEBAR_H_PCT = (SIDEBAR_H / BG_H) * 100;
 
 const TRANSPARENT = "rgba(0,0,0,0)";
+
+// ─── Color helpers ────────────────────────────────────────────────────────────
+
+function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
+  const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+  if (!m) return null;
+  return { r: parseInt(m[1], 16), g: parseInt(m[2], 16), b: parseInt(m[3], 16) };
+}
+
+function parseColorValue(value: string | null): { hex: string; alpha: number } {
+  if (!value || value === TRANSPARENT) return { hex: "#000000", alpha: 0 };
+  const rgba = /^rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)$/i.exec(value);
+  if (rgba) {
+    const r = parseInt(rgba[1]).toString(16).padStart(2, "0");
+    const g = parseInt(rgba[2]).toString(16).padStart(2, "0");
+    const b = parseInt(rgba[3]).toString(16).padStart(2, "0");
+    return { hex: `#${r}${g}${b}`, alpha: rgba[4] !== undefined ? parseFloat(rgba[4]) : 1 };
+  }
+  return { hex: value, alpha: 1 };
+}
+
+function composeColor(hex: string, alpha: number): string {
+  if (alpha <= 0) return TRANSPARENT;
+  if (alpha >= 1) return hex;
+  const rgb = hexToRgb(hex);
+  if (!rgb) return hex;
+  return `rgba(${rgb.r},${rgb.g},${rgb.b},${alpha.toFixed(2)})`;
+}
 
 function ColorField({
   label,
@@ -58,39 +92,49 @@ function ColorField({
   onChange: (v: string | null) => void;
   allowTransparent?: boolean;
 }) {
-  const isTransparent = value === TRANSPARENT;
+  const { hex, alpha } = parseColorValue(value);
+  const alphaPct = Math.round(alpha * 100);
+  const isEffectivelyTransparent = alpha <= 0;
+
+  const handleHexChange = (newHex: string) => onChange(composeColor(newHex, alpha));
+  const handleAlphaChange = (pct: number) => {
+    const a = pct / 100;
+    onChange(a <= 0 ? TRANSPARENT : composeColor(hex, a));
+  };
+
   return (
     <div className="space-y-1">
       <Label className="text-xs">{label}</Label>
       <div className="flex items-center gap-2">
         <input
           type="color"
-          value={isTransparent ? "#000000" : (value || "#000000")}
-          onChange={(e) => onChange(e.target.value)}
+          value={hex}
+          onChange={(e) => handleHexChange(e.target.value)}
           className="h-8 w-8 cursor-pointer rounded border border-slate-700"
         />
         <Input
-          value={isTransparent ? "transparent" : (value || "")}
+          value={isEffectivelyTransparent ? "transparent" : (value || "")}
           onChange={(e) => onChange(e.target.value || null)}
           placeholder="#000000"
           className="h-8 w-28 font-mono text-xs"
         />
         {allowTransparent && (
-          <button
-            onClick={() => onChange(isTransparent ? null : TRANSPARENT)}
-            className={`rounded px-1.5 py-0.5 text-[10px] font-medium transition ${
-              isTransparent
-                ? "bg-slate-500 text-white"
-                : "border border-slate-600 text-slate-400 hover:border-slate-400 hover:text-slate-200"
-            }`}
-          >
-            ⬜ Clear
-          </button>
+          <div className="flex flex-1 items-center gap-1.5 min-w-0">
+            <input
+              type="range"
+              min={0}
+              max={100}
+              value={alphaPct}
+              onChange={(e) => handleAlphaChange(parseInt(e.target.value))}
+              className="flex-1 h-1.5 cursor-pointer accent-slate-400"
+            />
+            <span className="w-7 text-right text-[9px] text-slate-500 tabular-nums">{alphaPct}%</span>
+          </div>
         )}
-        {value && !isTransparent && (
+        {value && (
           <button
             onClick={() => onChange(null)}
-            className="text-xs text-slate-500 hover:text-slate-300"
+            className="text-[10px] text-slate-600 hover:text-slate-300 flex-shrink-0"
           >
             Clear
           </button>
@@ -179,6 +223,56 @@ async function resizeToThumbnail(base64: string, mediaType: string): Promise<str
   });
 }
 
+// ─── Collapsible section shell ────────────────────────────────────────────────
+
+function Section({
+  icon,
+  title,
+  hint,
+  badge,
+  defaultOpen = false,
+  children,
+}: {
+  icon: React.ReactNode;
+  title: string;
+  hint?: string;       // small muted descriptor shown in the header row
+  badge?: React.ReactNode;
+  defaultOpen?: boolean;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div className="rounded-lg border border-slate-700 bg-slate-800/50">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center justify-between px-3 py-2.5 text-left"
+      >
+        <span className="flex items-center gap-1.5">
+          {icon}
+          <span className="text-xs font-medium text-slate-300">{title}</span>
+          {hint && (
+            <span className="text-[10px] text-slate-600">{hint}</span>
+          )}
+          {badge}
+        </span>
+        {open ? (
+          <ChevronUp className="h-3.5 w-3.5 flex-shrink-0 text-slate-600" />
+        ) : (
+          <ChevronDown className="h-3.5 w-3.5 flex-shrink-0 text-slate-600" />
+        )}
+      </button>
+      {open && (
+        <div className="border-t border-slate-700/60 px-3 pb-3 pt-2.5 space-y-2.5">
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Main component ───────────────────────────────────────────────────────────
+
 export function BrandingEditor() {
   const branding = useStore((s) => s.branding);
   const updateBranding = useStore((s) => s.updateBranding);
@@ -193,6 +287,10 @@ export function BrandingEditor() {
   const deleteBrandAnalysis = useStore((s) => s.deleteBrandAnalysis);
 
   const [styleHints, setStyleHints] = useState("");
+  // Canvas Quote Overlay section (FLUX plain bg + client-side Canvas text)
+  const [seamlessQuote, setSeamlessQuote] = useState("");
+  const [seamlessAttribution, setSeamlessAttribution] = useState("");
+  const [seamlessTreatment, setSeamlessTreatment] = useState<"band" | "card" | "bare">("band");
   const [generating, setGenerating] = useState(false);
   const [genProgress, setGenProgress] = useState("");
   const [preview, setPreview] = useState<BrandingPreview | null>(null);
@@ -330,10 +428,30 @@ export function BrandingEditor() {
         }).then((r) => r.json()),
       ]);
 
-      // fetch-photo returns [fal] — take the fal result (index 0)
+      // Use first result with a dataUri — fal is slot 0, Unsplash is slot 1 (fallback)
       const ts = new Date().toISOString();
-      const bgUri = bgData.results?.[0]?.dataUri as string | undefined;
-      const sbUri = sbData.results?.[0]?.dataUri as string | undefined;
+      const bgResults = (bgData.results ?? []) as { dataUri?: string }[];
+      const sbResults = (sbData.results ?? []) as { dataUri?: string; needsTextComposite?: boolean }[];
+      const bgUri = bgResults.find((r) => r.dataUri)?.dataUri;
+      const rawSbResult = sbResults.find((r) => r.dataUri);
+      const rawSbUri = rawSbResult?.dataUri;
+      const needsComposite = rawSbResult?.needsTextComposite === true;
+
+      // If the server flagged the sidebar as "needs text composite", draw the
+      // quote onto the FLUX-generated background via Canvas before fitting it
+      // to the 360×696 sidebar panel.
+      let compositedSbUri = rawSbUri;
+      if (compositedSbUri && needsComposite && quoteText) {
+        compositedSbUri = await compositeQuoteOnImage(
+          compositedSbUri,
+          quoteText,
+          restaurantName || "",
+          { treatment: "band" },
+        );
+      }
+      const sbUri = compositedSbUri
+        ? await fitToSidebar(compositedSbUri)
+        : undefined;
       const seamlessId = (bgUri && sbUri) ? generateId() : undefined;
 
       if (bgUri) {
@@ -384,21 +502,42 @@ export function BrandingEditor() {
         }),
       }).then((r) => r.json());
 
-      const bgUri = data.results?.[0]?.dataUri as string | undefined;
+      // Use first result with a dataUri — fal is slot 0, Unsplash is slot 1
+      const results = (data.results ?? []) as { dataUri?: string; error?: string }[];
+      const bgUri = results.find((r) => r.dataUri)?.dataUri;
       if (!bgUri) {
-        const err = data.results?.[0]?.error as string | undefined;
-        throw new Error(err || "No image returned from fal");
+        const err = (results[0]?.error || data.error) as string | undefined;
+        throw new Error(err || "No image returned — check FAL_KEY and server logs");
       }
 
       setGenProgress("Splitting into sidebar + background...");
       // Run the generated background through the same upload+split pipeline
       // for consistency — sidebar is cropped from the same image so the
       // overlay seam is invisible.
-      const { sidebarPng, backgroundPng } = await splitFromDataUri(bgUri);
+      const { sidebarPng: rawSidebar, backgroundPng } = await splitFromDataUri(bgUri);
+
+      // Composite quote text onto the sidebar if provided.
+      const trimmedQuote = seamlessQuote.trim();
+      let sidebarPng = rawSidebar;
+      if (trimmedQuote) {
+        setGenProgress("Compositing quote...");
+        sidebarPng = await compositeQuoteOnImage(
+          rawSidebar,
+          trimmedQuote,
+          seamlessAttribution.trim(),
+          {
+            treatment: seamlessTreatment,
+            fontFamily: "Georgia, serif",
+            textColor: "#ffffff",
+            canvasWidth: 360,
+            canvasHeight: 696,
+          },
+        );
+      }
 
       const ts = new Date().toISOString();
       const seamlessId = generateId();
-      addGeneratedImage({ id: generateId(), type: "sidebar", dataUri: sidebarPng, createdAt: ts, restaurantName: restaurantName || undefined, seamlessId });
+      addGeneratedImage({ id: generateId(), type: "sidebar", dataUri: sidebarPng, createdAt: ts, restaurantName: restaurantName || undefined, seamlessId, quoteText: trimmedQuote || undefined });
       addGeneratedImage({ id: generateId(), type: "background", dataUri: backgroundPng, createdAt: ts, restaurantName: restaurantName || undefined, seamlessId });
       setPreview((prev) => ({ ...prev, sidebarPng, backgroundPng }));
     } catch (err) {
@@ -461,6 +600,19 @@ export function BrandingEditor() {
     }
   }
 
+  async function handleLogoSidebarApply(rawDataUri: string) {
+    // Normalize to 360×696 so it drops into the sidebar panel cleanly.
+    const fitted = await fitToSidebar(rawDataUri);
+    updateBranding({ sidebar_picture: fitted });
+    addGeneratedImage({
+      id: generateId(),
+      type: "sidebar",
+      dataUri: fitted,
+      createdAt: new Date().toISOString(),
+      restaurantName: restaurantName || undefined,
+    });
+  }
+
   function useLibraryImage(dataUri: string, type: "sidebar" | "background") {
     if (type === "sidebar") {
       updateBranding({ sidebar_picture: dataUri });
@@ -496,22 +648,22 @@ export function BrandingEditor() {
             POS Branding
           </CardTitle>
         </CardHeader>
-        <CardContent className="space-y-4">
-          {/* Brand Intelligence */}
-          <div className="rounded-lg border border-slate-700 bg-slate-800/50 p-3 space-y-2.5">
-            <div className="flex items-center justify-between">
-              <Label className="text-xs text-slate-400 flex items-center gap-1.5">
-                <ScanSearch className="h-3.5 w-3.5 text-blue-400" />
-                Brand Intelligence
-              </Label>
-              {brandTokens && (
-                <button onClick={() => setBrandTokens(null)} className="text-[10px] text-slate-500 hover:text-red-400">
-                  Clear
-                </button>
-              )}
-            </div>
+        <CardContent className="space-y-2">
 
-            {/* Saved analyses — always visible when entries exist */}
+          {/* ── 1. Brand Intelligence ─────────────────────────────────────── */}
+          <Section
+            icon={<ScanSearch className="h-3.5 w-3.5 text-blue-400" />}
+            title="Brand Intelligence"
+            hint="· informs all AI generators"
+            defaultOpen={!brandTokens}
+            badge={
+              brandTokens ? (
+                <span className="ml-1 rounded-full bg-emerald-900/60 border border-emerald-700/50 px-1.5 py-px text-[9px] text-emerald-400">
+                  Active
+                </span>
+              ) : undefined
+            }
+          >
             {brandAnalyses.length > 0 && (
               <div className="flex gap-2 overflow-x-auto pb-1 -mx-0.5 px-0.5">
                 {brandAnalyses.map((a) => {
@@ -521,21 +673,14 @@ export function BrandingEditor() {
                     <div
                       key={a.id}
                       className={`group relative flex-shrink-0 cursor-pointer rounded border transition ${
-                        isActive
-                          ? "border-blue-500 ring-1 ring-blue-500/40"
-                          : "border-slate-700 hover:border-slate-500"
+                        isActive ? "border-blue-500 ring-1 ring-blue-500/40" : "border-slate-700 hover:border-slate-500"
                       }`}
                       style={{ width: 80 }}
                       onClick={() => setBrandTokens(a.tokens)}
                       title={a.brandName}
                     >
                       {a.thumbnailDataUri ? (
-                        <img
-                          src={a.thumbnailDataUri}
-                          alt={a.brandName}
-                          className="w-full rounded-t object-cover"
-                          style={{ height: 52 }}
-                        />
+                        <img src={a.thumbnailDataUri} alt={a.brandName} className="w-full rounded-t object-cover" style={{ height: 52 }} />
                       ) : (
                         <div className="flex gap-0.5 p-1.5 rounded-t" style={{ height: 52, backgroundColor: palette?.background || "#0d1b2a" }}>
                           {palette && Object.values(palette).slice(0, 3).map((c, i) => (
@@ -558,7 +703,6 @@ export function BrandingEditor() {
                 })}
               </div>
             )}
-
             {!brandTokens ? (
               <>
                 <div className="flex gap-2">
@@ -569,77 +713,132 @@ export function BrandingEditor() {
                     placeholder="Website or image URL to analyze…"
                     className="h-8 text-xs flex-1"
                   />
-                  <Button
-                    size="sm"
-                    onClick={() => analyzeBrand()}
-                    disabled={analyzing || !brandUrl.trim()}
-                    className="h-8 px-3 text-xs"
-                  >
+                  <Button size="sm" onClick={() => analyzeBrand()} disabled={analyzing || !brandUrl.trim()} className="h-8 px-3 text-xs">
                     {analyzing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Analyze"}
                   </Button>
                 </div>
                 <label className={`flex cursor-pointer items-center gap-1.5 text-[10px] text-slate-500 hover:text-slate-300 ${analyzing ? "pointer-events-none opacity-40" : ""}`}>
                   <Wand2 className="h-3 w-3" />
                   or drop a brand/restaurant photo
-                  <input
-                    type="file"
-                    accept="image/*"
-                    className="hidden"
-                    onChange={(e) => {
-                      const f = e.target.files?.[0];
-                      e.target.value = "";
-                      if (f) analyzeBrand(f);
-                    }}
-                    disabled={analyzing}
-                  />
+                  <input type="file" accept="image/*" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) analyzeBrand(f); }} disabled={analyzing} />
                 </label>
                 {brandError && <p className="text-[10px] text-red-400">{brandError}</p>}
               </>
             ) : (
-              <BrandTokenDisplay tokens={brandTokens} />
+              <div className="space-y-2">
+                <BrandTokenDisplay tokens={brandTokens} />
+                <button onClick={() => setBrandTokens(null)} className="text-[10px] text-slate-500 hover:text-red-400">
+                  Clear active tokens
+                </button>
+              </div>
             )}
-          </div>
+          </Section>
 
-          {/* AI Generate Section */}
-          <div className="rounded-lg border border-slate-700 bg-slate-800/50 p-3 space-y-2.5">
-            <Label className="text-xs text-slate-400">AI Branding Generator</Label>
+          {/* ── 2. Generate Branding (palette + sidebar + background) ─────── */}
+          <Section
+            icon={<Wand2 className="h-3.5 w-3.5 text-purple-400" />}
+            title="Generate Branding"
+            hint="· palette + sidebar + background"
+            defaultOpen
+          >
             <Input
               value={styleHints}
               onChange={(e) => setStyleHints(e.target.value)}
-              placeholder='Style hints: rustic, tropical, neon... or "Name" to render title in sidebar'
+              placeholder='Style hints: rustic, tropical, neon… or "Quote" to overlay text'
               className="h-8 text-xs"
             />
-            <Button
-              onClick={generateAll}
-              disabled={generating}
-              className="w-full gap-2"
-            >
+            <p className="text-[10px] text-slate-600 -mt-1">
+              Style hints are combined with Brand Intelligence tokens (if active) to guide generation.
+            </p>
+            <Button onClick={generateAll} disabled={generating} className="w-full gap-2">
               {generating ? (
-                <>
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                  {genProgress || "Generating..."}
-                </>
+                <><Loader2 className="h-4 w-4 animate-spin" />{genProgress || "Generating..."}</>
               ) : (
-                <>
-                  <Wand2 className="h-4 w-4" />
-                  Generate Branding
-                </>
+                <><Wand2 className="h-4 w-4" />Generate Branding</>
               )}
             </Button>
-            <p className="text-[10px] text-slate-600">
-              Generates color palette + sidebar image + background image
-            </p>
 
+            {/* Result preview */}
+            {preview && (
+              <div className="space-y-2.5 rounded-lg border border-amber-500/30 bg-amber-500/5 p-2.5">
+                <div className="flex items-center justify-between">
+                  <Label className="text-xs text-amber-400">Result — Review &amp; Apply</Label>
+                  <div className="flex gap-1.5">
+                    <Button size="sm" onClick={acceptAll} className="h-6 gap-1 bg-green-600 px-2 text-[10px] hover:bg-green-500">
+                      <Check className="h-3 w-3" /> Apply All
+                    </Button>
+                    <Button size="sm" variant="outline" onClick={generateAll} disabled={generating} className="h-6 px-2 text-[10px]">
+                      {generating ? <Loader2 className="h-3 w-3 animate-spin" /> : "Redo"}
+                    </Button>
+                    <Button size="sm" variant="ghost" onClick={() => setPreview(null)} className="h-6 px-1.5 text-[10px] text-slate-500">
+                      <X className="h-3 w-3" />
+                    </Button>
+                  </div>
+                </div>
+                {preview.palette && (
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between">
+                      <Label className="text-[10px] text-slate-400">Color Palette</Label>
+                      <button onClick={() => acceptPartial("palette")} className="text-[10px] text-green-400 hover:text-green-300">Apply colors</button>
+                    </div>
+                    <div className="flex gap-2">
+                      {[
+                        { label: "BG", color: preview.palette.background },
+                        { label: "Buttons", color: preview.palette.buttons_background_color },
+                        { label: "Font", color: preview.palette.buttons_font_color },
+                      ].map((c) => (
+                        <div key={c.label} className="flex items-center gap-1.5">
+                          <div className="h-6 w-6 rounded border border-slate-600" style={{ backgroundColor: c.color }} />
+                          <div className="text-[10px]">
+                            <div className="text-slate-400">{c.label}</div>
+                            <div className="font-mono text-slate-500">{c.color}</div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                <div className="flex gap-3">
+                  {preview.sidebarPng && (
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between">
+                        <Label className="text-[10px] text-slate-400">Sidebar</Label>
+                        <button onClick={() => acceptPartial("sidebar")} className="text-[10px] text-green-400 hover:text-green-300">Apply</button>
+                      </div>
+                      <div className="rounded bg-slate-900 p-1">
+                        <img src={preview.sidebarPng} alt="" className="h-32 rounded border border-slate-700" />
+                      </div>
+                    </div>
+                  )}
+                  {preview.backgroundPng && (
+                    <div className="flex-1 space-y-1">
+                      <div className="flex items-center justify-between">
+                        <Label className="text-[10px] text-slate-400">Background</Label>
+                        <button onClick={() => acceptPartial("background")} className="text-[10px] text-green-400 hover:text-green-300">Apply</button>
+                      </div>
+                      <div className="rounded bg-slate-900 p-1">
+                        <img src={preview.backgroundPng} alt="" className="max-h-32 w-full rounded border border-slate-700 object-cover" />
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </Section>
+
+          {/* ── 3. Generate Seamless ─────────────────────────────────────── */}
+          <Section
+            icon={<Sparkles className="h-3.5 w-3.5 text-amber-400" />}
+            title="Generate Seamless"
+            hint="· plain sidebar + background, no text"
+          >
             <div className="flex gap-2">
-              <Button
-                variant="outline"
-                onClick={generateSeamless}
-                disabled={generating}
-                className="flex-1 gap-1.5 text-xs"
-                size="sm"
-              >
-                <Sparkles className="h-3.5 w-3.5 text-amber-400" />
-                Generate Seamless
+              <Button variant="outline" onClick={generateSeamless} disabled={generating} className="flex-1 gap-1.5 text-xs" size="sm">
+                {generating ? (
+                  <><Loader2 className="h-3.5 w-3.5 animate-spin" />{genProgress || "Generating..."}</>
+                ) : (
+                  <><Sparkles className="h-3.5 w-3.5 text-amber-400" />Generate Seamless</>
+                )}
               </Button>
               <label className={`flex flex-1 cursor-pointer items-center justify-center gap-1.5 rounded-md border border-slate-600 bg-transparent px-2 py-1 text-xs font-medium text-slate-300 transition hover:border-slate-400 hover:text-white ${generating ? "pointer-events-none opacity-40" : ""}`}>
                 <Wand2 className="h-3.5 w-3.5" />
@@ -648,317 +847,216 @@ export function BrandingEditor() {
               </label>
             </div>
             <p className="text-[10px] text-slate-600">
-              Seamless: one image split across sidebar + background. Upload: use your own photo.
+              One FLUX image split into sidebar + background so the seam is invisible. Upload &amp; Split does the same with your own photo.
             </p>
-          </div>
+          </Section>
 
-          {/* Preview of generated branding */}
-          {preview && (
-            <div className="space-y-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3">
-              <div className="flex items-center justify-between">
-                <Label className="text-xs text-amber-400">Generated Branding — Review</Label>
-                <div className="flex gap-1.5">
-                  <Button
-                    size="sm"
-                    onClick={acceptAll}
-                    className="h-6 gap-1 bg-green-600 px-2 text-[10px] hover:bg-green-500"
+          {/* ── 4. Canvas Quote Overlay ──────────────────────────────────── */}
+          <Section
+            icon={<Sparkles className="h-3.5 w-3.5 text-sky-400" />}
+            title="Canvas Quote Overlay"
+            hint="· generate seamless, then draw text on top"
+          >
+            <textarea
+              value={seamlessQuote}
+              onChange={(e) => setSeamlessQuote(e.target.value)}
+              placeholder="e.g. Family recipes since 1987"
+              rows={2}
+              className="w-full resize-none rounded border border-slate-700 bg-slate-800 px-2 py-1.5 text-[11px] text-slate-200 placeholder:text-slate-600 focus:border-slate-500 focus:outline-none"
+            />
+            <Input
+              value={seamlessAttribution}
+              onChange={(e) => setSeamlessAttribution(e.target.value)}
+              placeholder="Attribution (optional) — e.g. Chef Maria"
+              className="h-7 text-[11px]"
+            />
+            <div className="flex items-center gap-1.5">
+              <span className="text-[9px] text-slate-600">Treatment:</span>
+              {(["Band", "Card", "Bare"] as const).map((t) => {
+                const val = t.toLowerCase() as "band" | "card" | "bare";
+                return (
+                  <button
+                    key={t}
+                    type="button"
+                    onClick={() => setSeamlessTreatment(val)}
+                    className={`rounded px-1.5 py-0.5 text-[9px] font-medium transition ${
+                      seamlessTreatment === val
+                        ? "bg-slate-500 text-white"
+                        : "border border-slate-600 text-slate-500 hover:border-slate-400 hover:text-slate-300"
+                    }`}
                   >
-                    <Check className="h-3 w-3" /> Apply All
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={generateAll}
-                    disabled={generating}
-                    className="h-6 px-2 text-[10px]"
-                  >
-                    {generating ? <Loader2 className="h-3 w-3 animate-spin" /> : "Regenerate"}
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => setPreview(null)}
-                    className="h-6 px-1.5 text-[10px] text-slate-500"
-                  >
-                    <X className="h-3 w-3" />
-                  </Button>
-                </div>
-              </div>
+                    {t}
+                  </button>
+                );
+              })}
+              <span className="text-[8px] text-slate-700 ml-1">Band = dark stripe · Card = rounded box · Bare = text only</span>
+            </div>
+            <Button
+              variant="outline"
+              onClick={generateSeamless}
+              disabled={generating || !seamlessQuote.trim()}
+              className="w-full gap-1.5 text-xs disabled:opacity-40"
+              size="sm"
+            >
+              {generating ? (
+                <><Loader2 className="h-3.5 w-3.5 animate-spin" />{genProgress || "Generating..."}</>
+              ) : (
+                <><Sparkles className="h-3.5 w-3.5 text-sky-400" />Generate + Overlay Text</>
+              )}
+            </Button>
+            <p className="text-[10px] text-slate-600">
+              Generates a plain FLUX background, then draws the quote onto the sidebar using the browser Canvas API. The text position and style are pixel-precise.
+            </p>
+          </Section>
 
-              {/* Palette preview */}
-              {preview.palette && (
-                <div className="space-y-1">
-                  <div className="flex items-center justify-between">
-                    <Label className="text-[10px] text-slate-400">Color Palette</Label>
-                    <button
-                      onClick={() => acceptPartial("palette")}
-                      className="text-[10px] text-green-400 hover:text-green-300"
+
+          {/* ── 6. Logo Sidebar (rembg + FLUX Pro + sharp composite) ─────── */}
+          <LogoSidebarGenerator
+            brandTokens={brandTokens}
+            onUseSidebar={handleLogoSidebarApply}
+          />
+
+          {/* ── 7. Colors ─────────────────────────────────────────────────── */}
+          <Section
+            icon={<Palette className="h-3.5 w-3.5 text-purple-400" />}
+            title="Colors"
+            hint="· applied directly to POS"
+          >
+            <div className="grid gap-4 sm:grid-cols-2">
+              <ColorField label="Background Color" value={branding.background} onChange={(v) => updateBranding({ background: v })} />
+              <ColorField label="Buttons Background" value={branding.buttons_background_color} onChange={(v) => updateBranding({ buttons_background_color: v })} allowTransparent />
+              <ColorField label="Buttons Font Color" value={branding.buttons_font_color} onChange={(v) => updateBranding({ buttons_font_color: v })} />
+            </div>
+          </Section>
+
+          {/* ── 6. Active Images (always visible compact strip) ───────────── */}
+          <Section
+            icon={<ImageIcon className="h-3.5 w-3.5 text-slate-400" />}
+            title="Active Images"
+            hint="· currently applied to POS"
+            defaultOpen={!!(branding.sidebar_picture || branding.background_picture)}
+          >
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="space-y-1">
+                <Label className="text-[10px] text-slate-400">Sidebar</Label>
+                {branding.sidebar_picture ? (
+                  <div className="flex items-center gap-2">
+                    <div className="h-12 w-6 cursor-pointer overflow-hidden rounded border border-slate-700 hover:border-blue-500/50"
+                      onClick={() => { setLightbox([{ src: branding.sidebar_picture!, name: "Sidebar" }]); setLightboxIdx(0); }}
+                      title="Click to view full size"
                     >
-                      Apply colors
-                    </button>
+                      <img src={branding.sidebar_picture} alt="" className="h-full w-full object-cover" />
+                    </div>
+                    <span className="flex-1 truncate text-[10px] text-slate-500">{branding.sidebar_picture.startsWith("data:") ? "Generated" : "URL"}</span>
+                    <button onClick={() => updateBranding({ sidebar_picture: null })} className="text-[10px] text-slate-500 hover:text-red-400">Clear</button>
                   </div>
-                  <div className="flex gap-2">
-                    {[
-                      { label: "BG", color: preview.palette.background },
-                      { label: "Buttons", color: preview.palette.buttons_background_color },
-                      { label: "Font", color: preview.palette.buttons_font_color },
-                    ].map((c) => (
-                      <div key={c.label} className="flex items-center gap-1.5">
-                        <div
-                          className="h-6 w-6 rounded border border-slate-600"
-                          style={{ backgroundColor: c.color }}
-                        />
-                        <div className="text-[10px]">
-                          <div className="text-slate-400">{c.label}</div>
-                          <div className="font-mono text-slate-500">{c.color}</div>
-                        </div>
+                ) : (
+                  <p className="text-[10px] text-slate-600">None set</p>
+                )}
+              </div>
+              <div className="space-y-1">
+                <Label className="text-[10px] text-slate-400">Background</Label>
+                {branding.background_picture ? (
+                  <div className="flex items-center gap-2">
+                    <div className="h-8 w-14 cursor-pointer overflow-hidden rounded border border-slate-700 hover:border-blue-500/50"
+                      onClick={() => { setLightbox([{ src: branding.background_picture!, name: "Background" }]); setLightboxIdx(0); }}
+                      title="Click to view full size"
+                    >
+                      <img src={branding.background_picture} alt="" className="h-full w-full object-cover" />
+                    </div>
+                    <span className="flex-1 truncate text-[10px] text-slate-500">{branding.background_picture.startsWith("data:") ? "Generated" : "URL"}</span>
+                    <button onClick={() => updateBranding({ background_picture: null })} className="text-[10px] text-slate-500 hover:text-red-400">Clear</button>
+                  </div>
+                ) : (
+                  <p className="text-[10px] text-slate-600">None set</p>
+                )}
+              </div>
+            </div>
+          </Section>
+
+          {/* ── 7. Image Library ──────────────────────────────────────────── */}
+          {imageLibrary.filter((i) => i.type !== "item").length > 0 && (
+            <Section
+              icon={<Library className="h-3.5 w-3.5 text-slate-400" />}
+              title="Image Library"
+              hint={`· ${seamlessPairs.length} seamless · ${sidebarImages.length + backgroundImages.length} standalone`}
+            >
+              <div className="space-y-3">
+              {/* Seamless pairs */}
+              {seamlessPairs.length > 0 && (
+                <div className="space-y-1.5">
+                  <Label className="text-[10px] text-slate-500">Seamless Pairs ({seamlessPairs.length})</Label>
+                  <div className="flex flex-wrap gap-3">
+                    {seamlessPairs.map((pair) => (
+                      <div key={pair.id} className="group relative flex gap-0.5 rounded border border-amber-700/40 bg-amber-950/20 p-1 hover:border-amber-500/60">
+                        {pair.sidebar && (
+                          <div className="relative overflow-hidden rounded">
+                            <img
+                              src={pair.sidebar.dataUri}
+                              alt="Sidebar"
+                              className="h-20 w-auto cursor-pointer"
+                              title={pair.sidebar.quoteText ? `Quote: "${pair.sidebar.quoteText}" — click to use sidebar` : "Click to use sidebar"}
+                              onClick={() => useLibraryImage(pair.sidebar!.dataUri, "sidebar")}
+                            />
+                            {pair.sidebar.quoteText && (
+                              <span className="absolute left-0.5 top-0.5 rounded bg-amber-600/90 px-1 py-px text-[8px] font-bold text-white" title={`"${pair.sidebar.quoteText}"`}>T</span>
+                            )}
+                          </div>
+                        )}
+                        {pair.background && (
+                          <div className="relative overflow-hidden rounded">
+                            <img src={pair.background.dataUri} alt="Background" className="h-20 w-auto cursor-pointer" title="Click to use background" onClick={() => useLibraryImage(pair.background!.dataUri, "background")} />
+                          </div>
+                        )}
+                        <button
+                          onClick={() => { if (pair.sidebar) useLibraryImage(pair.sidebar.dataUri, "sidebar"); if (pair.background) useLibraryImage(pair.background.dataUri, "background"); }}
+                          className="absolute bottom-1 left-1/2 -translate-x-1/2 hidden rounded bg-amber-600/90 px-2 py-0.5 text-[9px] font-semibold text-white group-hover:block"
+                        >
+                          Use Both
+                        </button>
+                        <button
+                          onClick={() => { if (pair.sidebar) deleteGeneratedImage(pair.sidebar.id); if (pair.background) deleteGeneratedImage(pair.background.id); }}
+                          className="absolute right-0.5 top-0.5 hidden rounded bg-black/70 p-0.5 text-red-400 hover:text-red-300 group-hover:block"
+                        >
+                          <Trash2 className="h-2.5 w-2.5" />
+                        </button>
                       </div>
                     ))}
                   </div>
                 </div>
               )}
 
-              {/* Image previews */}
-              <div className="flex gap-3">
-                {preview.sidebarPng && (
-                  <div className="space-y-1">
-                    <div className="flex items-center justify-between">
-                      <Label className="text-[10px] text-slate-400">Sidebar</Label>
-                      <button
-                        onClick={() => acceptPartial("sidebar")}
-                        className="text-[10px] text-green-400 hover:text-green-300"
-                      >
-                        Apply
-                      </button>
-                    </div>
-                    <div className="rounded bg-slate-900 p-1">
-                      <img src={preview.sidebarPng} alt="" className="h-32 rounded border border-slate-700" />
-                    </div>
+              {/* Standalone sidebars */}
+              {sidebarImages.length > 0 && (
+                <div className="space-y-1.5">
+                  <Label className="text-[10px] text-slate-500">Sidebars ({sidebarImages.length})</Label>
+                  <div className="flex flex-wrap gap-2">
+                    {sidebarImages.map((img, i) => (
+                      <div key={img.id} className="group relative overflow-hidden rounded border border-slate-700 hover:border-blue-500/50">
+                        <img src={img.dataUri} alt="" className="h-20 w-auto cursor-pointer" onClick={() => useLibraryImage(img.dataUri, "sidebar")} title="Click to use · double-click to view" onDoubleClick={() => { setLightbox(sidebarImages.map((s) => ({ src: s.dataUri, name: "Sidebar" }))); setLightboxIdx(i); }} />
+                        <button onClick={() => deleteGeneratedImage(img.id)} className="absolute right-0.5 top-0.5 hidden rounded bg-black/70 p-0.5 text-red-400 hover:text-red-300 group-hover:block"><Trash2 className="h-2.5 w-2.5" /></button>
+                      </div>
+                    ))}
                   </div>
-                )}
-                {preview.backgroundPng && (
-                  <div className="flex-1 space-y-1">
-                    <div className="flex items-center justify-between">
-                      <Label className="text-[10px] text-slate-400">Background</Label>
-                      <button
-                        onClick={() => acceptPartial("background")}
-                        className="text-[10px] text-green-400 hover:text-green-300"
-                      >
-                        Apply
-                      </button>
-                    </div>
-                    <div className="rounded bg-slate-900 p-1">
-                      <img src={preview.backgroundPng} alt="" className="max-h-32 w-full rounded border border-slate-700 object-cover" />
-                    </div>
+                </div>
+              )}
+
+              {/* Standalone backgrounds */}
+              {backgroundImages.length > 0 && (
+                <div className="space-y-1.5">
+                  <Label className="text-[10px] text-slate-500">Backgrounds ({backgroundImages.length})</Label>
+                  <div className="flex flex-wrap gap-2">
+                    {backgroundImages.map((img, i) => (
+                      <div key={img.id} className="group relative overflow-hidden rounded border border-slate-700 hover:border-purple-500/50">
+                        <img src={img.dataUri} alt="" className="h-16 w-auto cursor-pointer" onClick={() => useLibraryImage(img.dataUri, "background")} title="Click to use · double-click to view" onDoubleClick={() => { setLightbox(backgroundImages.map((b) => ({ src: b.dataUri, name: "Background" }))); setLightboxIdx(i); }} />
+                        <button onClick={() => deleteGeneratedImage(img.id)} className="absolute right-0.5 top-0.5 hidden rounded bg-black/70 p-0.5 text-red-400 hover:text-red-300 group-hover:block"><Trash2 className="h-2.5 w-2.5" /></button>
+                      </div>
+                    ))}
                   </div>
-                )}
+                </div>
+              )}
               </div>
-            </div>
-          )}
-
-          {/* Manual Color Controls */}
-          <div className="grid gap-4 sm:grid-cols-2">
-            <ColorField
-              label="Background Color"
-              value={branding.background}
-              onChange={(v) => updateBranding({ background: v })}
-            />
-            <ColorField
-              label="Buttons Background"
-              value={branding.buttons_background_color}
-              onChange={(v) => updateBranding({ buttons_background_color: v })}
-              allowTransparent
-            />
-            <ColorField
-              label="Buttons Font Color"
-              value={branding.buttons_font_color}
-              onChange={(v) => updateBranding({ buttons_font_color: v })}
-            />
-          </div>
-
-          {/* Current Images */}
-          <div className="grid gap-3 sm:grid-cols-2">
-            {/* Sidebar */}
-            <div className="space-y-1">
-              <Label className="text-xs">Sidebar Picture</Label>
-              {branding.sidebar_picture ? (
-                <div className="flex items-center gap-2">
-                  <div
-                    className="h-12 w-6 cursor-pointer overflow-hidden rounded border border-slate-700 hover:border-blue-500/50"
-                    onClick={() => { setLightbox([{ src: branding.sidebar_picture!, name: "Sidebar" }]); setLightboxIdx(0); }}
-                    title="Click to view full size"
-                  >
-                    <img src={branding.sidebar_picture} alt="" className="h-full w-full object-cover" />
-                  </div>
-                  <span className="flex-1 truncate text-[10px] text-slate-500">
-                    {branding.sidebar_picture.startsWith("data:") ? "Generated" : "URL"}
-                  </span>
-                  <button onClick={() => updateBranding({ sidebar_picture: null })} className="text-[10px] text-slate-500 hover:text-red-400">
-                    Clear
-                  </button>
-                </div>
-              ) : (
-                <p className="text-[10px] text-slate-600">None — use AI generator above</p>
-              )}
-            </div>
-
-            {/* Background image */}
-            <div className="space-y-1">
-              <Label className="text-xs">Background Image</Label>
-              {branding.background_picture ? (
-                <div className="flex items-center gap-2">
-                  <div
-                    className="h-8 w-14 cursor-pointer overflow-hidden rounded border border-slate-700 hover:border-blue-500/50"
-                    onClick={() => { setLightbox([{ src: branding.background_picture!, name: "Background" }]); setLightboxIdx(0); }}
-                    title="Click to view full size"
-                  >
-                    <img src={branding.background_picture} alt="" className="h-full w-full object-cover" />
-                  </div>
-                  <span className="flex-1 truncate text-[10px] text-slate-500">
-                    {branding.background_picture.startsWith("data:") ? "Generated" : "URL"}
-                  </span>
-                  <button onClick={() => updateBranding({ background_picture: null })} className="text-[10px] text-slate-500 hover:text-red-400">
-                    Clear
-                  </button>
-                </div>
-              ) : (
-                <p className="text-[10px] text-slate-600">None — use AI generator above</p>
-              )}
-            </div>
-          </div>
-
-          {/* Image Library */}
-          {imageLibrary.filter((i) => i.type !== "item").length > 0 && (
-            <div className="space-y-2">
-              <button
-                onClick={() => setShowLibrary(!showLibrary)}
-                className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-200"
-              >
-                <Library className="h-3.5 w-3.5" />
-                Image Library ({seamlessPairs.length} seamless · {sidebarImages.length + backgroundImages.length} standalone)
-              </button>
-
-              {showLibrary && (
-                <div className="space-y-3 rounded-lg border border-slate-700 bg-slate-800/50 p-3">
-                  {/* Seamless pairs */}
-                  {seamlessPairs.length > 0 && (
-                    <div className="space-y-1.5">
-                      <Label className="text-[10px] text-slate-500">Seamless Pairs ({seamlessPairs.length})</Label>
-                      <div className="flex flex-wrap gap-3">
-                        {seamlessPairs.map((pair) => (
-                          <div key={pair.id} className="group relative flex gap-0.5 rounded border border-amber-700/40 bg-amber-950/20 p-1 hover:border-amber-500/60">
-                            {/* Sidebar thumbnail */}
-                            {pair.sidebar && (
-                              <div className="relative overflow-hidden rounded">
-                                <img
-                                  src={pair.sidebar.dataUri}
-                                  alt="Sidebar"
-                                  className="h-20 w-auto cursor-pointer"
-                                  title="Click to use sidebar"
-                                  onClick={() => useLibraryImage(pair.sidebar!.dataUri, "sidebar")}
-                                />
-                              </div>
-                            )}
-                            {/* Background thumbnail */}
-                            {pair.background && (
-                              <div className="relative overflow-hidden rounded">
-                                <img
-                                  src={pair.background.dataUri}
-                                  alt="Background"
-                                  className="h-20 w-auto cursor-pointer"
-                                  title="Click to use background"
-                                  onClick={() => useLibraryImage(pair.background!.dataUri, "background")}
-                                />
-                              </div>
-                            )}
-                            {/* Apply both */}
-                            <button
-                              onClick={() => {
-                                if (pair.sidebar) useLibraryImage(pair.sidebar.dataUri, "sidebar");
-                                if (pair.background) useLibraryImage(pair.background.dataUri, "background");
-                              }}
-                              className="absolute bottom-1 left-1/2 -translate-x-1/2 hidden rounded bg-amber-600/90 px-2 py-0.5 text-[9px] font-semibold text-white group-hover:block"
-                            >
-                              Use Both
-                            </button>
-                            {/* Delete pair */}
-                            <button
-                              onClick={() => {
-                                if (pair.sidebar) deleteGeneratedImage(pair.sidebar.id);
-                                if (pair.background) deleteGeneratedImage(pair.background.id);
-                              }}
-                              className="absolute right-0.5 top-0.5 hidden rounded bg-black/70 p-0.5 text-red-400 hover:text-red-300 group-hover:block"
-                            >
-                              <Trash2 className="h-2.5 w-2.5" />
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Standalone sidebars */}
-                  {sidebarImages.length > 0 && (
-                    <div className="space-y-1.5">
-                      <Label className="text-[10px] text-slate-500">Sidebars ({sidebarImages.length})</Label>
-                      <div className="flex flex-wrap gap-2">
-                        {sidebarImages.map((img, i) => (
-                          <div key={img.id} className="group relative overflow-hidden rounded border border-slate-700 hover:border-blue-500/50">
-                            <img
-                              src={img.dataUri}
-                              alt=""
-                              className="h-20 w-auto cursor-pointer"
-                              onClick={() => useLibraryImage(img.dataUri, "sidebar")}
-                              title="Click to use · double-click to view"
-                              onDoubleClick={() => {
-                                setLightbox(sidebarImages.map((s) => ({ src: s.dataUri, name: "Sidebar" })));
-                                setLightboxIdx(i);
-                              }}
-                            />
-                            <button
-                              onClick={() => deleteGeneratedImage(img.id)}
-                              className="absolute right-0.5 top-0.5 hidden rounded bg-black/70 p-0.5 text-red-400 hover:text-red-300 group-hover:block"
-                            >
-                              <Trash2 className="h-2.5 w-2.5" />
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Standalone backgrounds */}
-                  {backgroundImages.length > 0 && (
-                    <div className="space-y-1.5">
-                      <Label className="text-[10px] text-slate-500">Backgrounds ({backgroundImages.length})</Label>
-                      <div className="flex flex-wrap gap-2">
-                        {backgroundImages.map((img, i) => (
-                          <div key={img.id} className="group relative overflow-hidden rounded border border-slate-700 hover:border-purple-500/50">
-                            <img
-                              src={img.dataUri}
-                              alt=""
-                              className="h-16 w-auto cursor-pointer"
-                              onClick={() => useLibraryImage(img.dataUri, "background")}
-                              title="Click to use · double-click to view"
-                              onDoubleClick={() => {
-                                setLightbox(backgroundImages.map((b) => ({ src: b.dataUri, name: "Background" })));
-                                setLightboxIdx(i);
-                              }}
-                            />
-                            <button
-                              onClick={() => deleteGeneratedImage(img.id)}
-                              className="absolute right-0.5 top-0.5 hidden rounded bg-black/70 p-0.5 text-red-400 hover:text-red-300 group-hover:block"
-                            >
-                              <Trash2 className="h-2.5 w-2.5" />
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
+            </Section>
           )}
 
           {/* Mini POS Preview */}

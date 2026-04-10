@@ -1,19 +1,23 @@
-import { createServerClient } from "@/lib/supabase/server";
+import { turso } from "@/lib/turso";
+import { randomUUID } from "crypto";
 
 // GET /api/connections — list saved connections
 export async function GET() {
   try {
-    const supabase = createServerClient();
-    const { data, error } = await supabase
-      .from("connections")
-      .select("id, name, host, port, database_name, username, upload_server_url, created_at")
-      .order("created_at", { ascending: false });
-
-    if (error) {
-      return Response.json({ error: error.message }, { status: 500 });
-    }
-
-    return Response.json({ connections: data ?? [] });
+    const result = await turso.execute(
+      "SELECT id, name, host, port, database_name, username, upload_server_url, created_at FROM connections ORDER BY created_at DESC",
+    );
+    const connections = result.rows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      host: r.host,
+      port: r.port,
+      database_name: r.database_name,
+      username: r.username,
+      upload_server_url: r.upload_server_url,
+      created_at: r.created_at,
+    }));
+    return Response.json({ connections });
   } catch (error: unknown) {
     return Response.json({ error: (error as Error).message }, { status: 500 });
   }
@@ -36,27 +40,25 @@ export async function POST(request: Request) {
       return Response.json({ error: "Missing required fields" }, { status: 400 });
     }
 
-    const supabase = createServerClient();
-    const { data, error } = await supabase
-      .from("connections")
-      .insert({
-        user_email: "aaron@valuesystemspos.com",
-        name: body.name,
-        host: body.host,
-        port: body.port || 3306,
-        database_name: body.database_name,
-        username: body.username,
-        password_encrypted: body.password,
-        upload_server_url: body.upload_server_url || null,
-      })
-      .select("id")
-      .single();
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    await turso.execute({
+      sql: `INSERT INTO connections (id, name, host, port, database_name, username, password_encrypted, upload_server_url, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      args: [
+        id,
+        body.name,
+        body.host,
+        body.port || 3306,
+        body.database_name,
+        body.username,
+        body.password || null,
+        body.upload_server_url || null,
+        now,
+      ],
+    });
 
-    if (error) {
-      return Response.json({ error: error.message }, { status: 500 });
-    }
-
-    return Response.json({ ok: true, id: data?.id });
+    return Response.json({ ok: true, id });
   } catch (error: unknown) {
     return Response.json({ error: (error as Error).message }, { status: 500 });
   }
@@ -67,17 +69,9 @@ export async function DELETE(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
     const id = searchParams.get("id");
-    if (!id) {
-      return Response.json({ error: "Missing id" }, { status: 400 });
-    }
+    if (!id) return Response.json({ error: "Missing id" }, { status: 400 });
 
-    const supabase = createServerClient();
-    const { error } = await supabase.from("connections").delete().eq("id", id);
-
-    if (error) {
-      return Response.json({ error: error.message }, { status: 500 });
-    }
-
+    await turso.execute({ sql: "DELETE FROM connections WHERE id = ?", args: [id] });
     return Response.json({ ok: true });
   } catch (error: unknown) {
     return Response.json({ error: (error as Error).message }, { status: 500 });

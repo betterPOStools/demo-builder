@@ -1,9 +1,8 @@
-import { createServerClient } from "@/lib/supabase/server";
+import { turso } from "@/lib/turso";
 
 // POST /api/connections/test
-// Checks agent reachability via Supabase heartbeat instead of direct TCP.
-// Vercel runs in AWS and can never reach Tailscale IPs directly — TCP probes
-// always fail. Instead the agent updates agent_last_seen every poll cycle.
+// Checks agent reachability via heartbeat (agent_last_seen) instead of direct TCP.
+// Vercel runs in AWS and can never reach Tailscale IPs directly.
 export async function POST(request: Request) {
   try {
     const body = (await request.json()) as {
@@ -11,42 +10,37 @@ export async function POST(request: Request) {
       host?: string;
     };
 
-    const supabase = createServerClient();
-
     if (body.connectionId) {
-      const { data, error } = await supabase
-        .from("connections")
-        .select("host, agent_last_seen")
-        .eq("id", body.connectionId)
-        .single();
+      const result = await turso.execute({
+        sql: "SELECT host, agent_last_seen FROM connections WHERE id = ? LIMIT 1",
+        args: [body.connectionId],
+      });
 
-      if (error || !data) {
+      if (result.rows.length === 0) {
         return Response.json({ ok: false, error: "Connection not found" }, { status: 404 });
       }
 
-      if (data.agent_last_seen) {
-        const ageMs = Date.now() - new Date(data.agent_last_seen).getTime();
+      const row = result.rows[0];
+      if (row.agent_last_seen) {
+        const ageMs = Date.now() - new Date(row.agent_last_seen as string).getTime();
         const ageSec = Math.round(ageMs / 1000);
         if (ageMs < 30_000) {
-          return Response.json({ ok: true, host: data.host, method: "heartbeat", ageSec });
+          return Response.json({ ok: true, host: row.host, method: "heartbeat", ageSec });
         }
         return Response.json({
-          ok: false, host: data.host, method: "heartbeat", ageSec,
+          ok: false, host: row.host, method: "heartbeat", ageSec,
           error: `Agent last seen ${ageSec}s ago — may be offline`,
         });
       }
     }
 
-    // No heartbeat yet — use last successful deploy as a proxy signal
-    const { data: recent } = await supabase
-      .from("sessions")
-      .select("updated_at")
-      .eq("deploy_status", "done")
-      .order("updated_at", { ascending: false })
-      .limit(1);
+    // No heartbeat — use last successful deploy as a proxy signal
+    const recent = await turso.execute(
+      "SELECT updated_at FROM sessions WHERE deploy_status = 'done' ORDER BY updated_at DESC LIMIT 1",
+    );
 
-    if (recent && recent.length > 0) {
-      const ageMin = Math.round((Date.now() - new Date(recent[0].updated_at).getTime()) / 60_000);
+    if (recent.rows.length > 0) {
+      const ageMin = Math.round((Date.now() - new Date(recent.rows[0].updated_at as string).getTime()) / 60_000);
       return Response.json({
         ok: true,
         host: body.host || "",
@@ -58,7 +52,7 @@ export async function POST(request: Request) {
     return Response.json({
       ok: false,
       host: body.host || "",
-      error: "No heartbeat data. Make sure the agent is running on the tablet.",
+      error: "No heartbeat data. Make sure the agent is running.",
     });
   } catch (error: unknown) {
     return Response.json({ ok: false, error: (error as Error).message }, { status: 500 });

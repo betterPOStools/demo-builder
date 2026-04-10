@@ -50,9 +50,9 @@ export interface DeployStats {
 }
 
 export interface PendingImageTransfer {
-  type: "item" | "group";
+  type: "item" | "group" | "branding";
   name: string;
-  entity_id: string;
+  entity_id: string | undefined;
   image_url: string;
   dest_path: string;
 }

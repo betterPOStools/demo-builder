@@ -47,9 +47,12 @@ export function ImageGenerator() {
   const updateItem = useStore((s) => s.updateItem);
 
   const [styleHints, setStyleHints] = useState("");
+  const [recraftStyle, setRecraftStyle] = useState<"vector_illustration" | "digital_illustration">("digital_illustration");
   const [generating, setGenerating] = useState(false);
   const [progress, setProgress] = useState<ItemImageStatus[]>([]);
   const [showLibrary, setShowLibrary] = useState(true);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [showItemPicker, setShowItemPicker] = useState(false);
 
   const groupMap = new Map(groups.map((g) => [g.id, g]));
 
@@ -69,6 +72,7 @@ export function ImageGenerator() {
             groupName,
             restaurantType,
             styleHints: styleHints.trim() || undefined,
+            recraftStyle,
           }),
         });
 
@@ -92,22 +96,24 @@ export function ImageGenerator() {
         return { error: (err as Error).message };
       }
     },
-    [restaurantType, styleHints],
+    [restaurantType, styleHints, recraftStyle],
   );
 
   async function generateAll() {
     if (items.length === 0) return;
     setGenerating(true);
 
-    // Build status list for items that don't already have images
-    const batch: ItemImageStatus[] = items
-      .filter((item) => !item.posImagePath && !item.imageAssetId)
-      .map((item) => ({
-        itemId: item.id,
-        itemName: item.name,
-        groupName: groupMap.get(item.groupId)?.name || "Unknown",
-        status: "pending" as const,
-      }));
+    // If items are selected, generate only those; otherwise all without images
+    const toGenerate = selectedIds.size > 0
+      ? items.filter((item) => selectedIds.has(item.id))
+      : items.filter((item) => !item.posImagePath && !item.imageAssetId);
+
+    const batch: ItemImageStatus[] = toGenerate.map((item) => ({
+      itemId: item.id,
+      itemName: item.name,
+      groupName: groupMap.get(item.groupId)?.name || "Unknown",
+      status: "pending" as const,
+    }));
 
     setProgress(batch);
 
@@ -259,16 +265,110 @@ export function ImageGenerator() {
             <Label className="text-xs text-slate-400">
               AI Image Generator
             </Label>
+            <div className="flex items-center gap-1.5">
+              <span className="text-[9px] text-slate-600">Style:</span>
+              {(["vector_illustration", "digital_illustration"] as const).map((s) => (
+                <button
+                  key={s}
+                  type="button"
+                  onClick={() => setRecraftStyle(s)}
+                  className={`rounded px-1.5 py-0.5 text-[9px] font-medium transition ${
+                    recraftStyle === s
+                      ? "bg-slate-500 text-white"
+                      : "border border-slate-600 text-slate-500 hover:border-slate-400 hover:text-slate-300"
+                  }`}
+                >
+                  {s === "vector_illustration" ? "Vector" : "Digital"}
+                </button>
+              ))}
+            </div>
             <Input
               value={styleHints}
               onChange={(e) => setStyleHints(e.target.value)}
               placeholder="Style hints: flat icons, colorful, minimal, neon..."
               className="h-8 text-xs"
             />
+            {/* Item picker */}
+            <div>
+              <button
+                type="button"
+                onClick={() => setShowItemPicker((v) => !v)}
+                className="flex items-center gap-1.5 text-[10px] text-slate-500 hover:text-slate-300"
+              >
+                <span>{showItemPicker ? "▾" : "▸"}</span>
+                {selectedIds.size > 0
+                  ? `${selectedIds.size} item${selectedIds.size !== 1 ? "s" : ""} selected`
+                  : "Select specific items (optional)"}
+              </button>
+              {showItemPicker && (
+                <div className="mt-1.5 space-y-1">
+                  <div className="flex gap-2 mb-1">
+                    <button
+                      type="button"
+                      onClick={() => setSelectedIds(new Set(itemsWithoutImages.map((i) => i.id)))}
+                      className="text-[9px] text-blue-400 hover:text-blue-300"
+                    >
+                      Select without images
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedIds(new Set(items.map((i) => i.id)))}
+                      className="text-[9px] text-slate-500 hover:text-slate-300"
+                    >
+                      Select all
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedIds(new Set())}
+                      className="text-[9px] text-slate-600 hover:text-slate-400"
+                    >
+                      Clear
+                    </button>
+                  </div>
+                  <div className="max-h-48 overflow-y-auto rounded border border-slate-700 bg-slate-900/60">
+                    {groups.map((group) => {
+                      const groupItems = items.filter((i) => i.groupId === group.id);
+                      if (groupItems.length === 0) return null;
+                      return (
+                        <div key={group.id}>
+                          <div className="sticky top-0 bg-slate-800/90 px-2 py-0.5 text-[9px] font-semibold text-slate-500 uppercase tracking-wide">
+                            {group.name}
+                          </div>
+                          {groupItems.map((item) => (
+                            <label
+                              key={item.id}
+                              className="flex cursor-pointer items-center gap-2 px-2 py-0.5 hover:bg-slate-800/60"
+                            >
+                              <input
+                                type="checkbox"
+                                checked={selectedIds.has(item.id)}
+                                onChange={(e) => {
+                                  setSelectedIds((prev) => {
+                                    const next = new Set(prev);
+                                    e.target.checked ? next.add(item.id) : next.delete(item.id);
+                                    return next;
+                                  });
+                                }}
+                                className="h-3 w-3 accent-blue-500"
+                              />
+                              <span className="flex-1 truncate text-[10px] text-slate-300">{item.name}</span>
+                              {item.posImagePath && (
+                                <img src={item.posImagePath} alt="" className="h-4 w-4 rounded object-cover opacity-60" />
+                              )}
+                            </label>
+                          ))}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+
             <div className="flex gap-2">
               <Button
                 onClick={generateAll}
-                disabled={generating || itemsWithoutImages.length === 0}
+                disabled={generating || (selectedIds.size === 0 && itemsWithoutImages.length === 0)}
                 className="flex-1 gap-2"
               >
                 {generating ? (
@@ -276,10 +376,15 @@ export function ImageGenerator() {
                     <Loader2 className="h-4 w-4 animate-spin" />
                     Generating...
                   </>
+                ) : selectedIds.size > 0 ? (
+                  <>
+                    <Sparkles className="h-4 w-4" />
+                    Generate {selectedIds.size} Selected
+                  </>
                 ) : (
                   <>
                     <Sparkles className="h-4 w-4" />
-                    Generate for {itemsWithoutImages.length} Items
+                    Generate {itemsWithoutImages.length} Without Images
                   </>
                 )}
               </Button>
@@ -296,7 +401,7 @@ export function ImageGenerator() {
               )}
             </div>
             <p className="text-[10px] text-slate-600">
-              Generates 90x90px icons, 3 at a time. Uses Haiku for speed.
+              3 at a time via Recraft V3. Select specific items above or generate all at once.
             </p>
           </div>
 

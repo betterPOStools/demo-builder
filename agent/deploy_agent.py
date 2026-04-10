@@ -53,8 +53,8 @@ def load_env():
 
 load_env()
 
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
+TURSO_DATABASE_URL = os.environ.get("TURSO_DATABASE_URL", "").replace("libsql://", "https://")
+TURSO_AUTH_TOKEN = os.environ.get("TURSO_AUTH_TOKEN", "")
 DB_HOST = os.environ.get("DB_HOST", "100.112.68.19")
 DB_PORT = int(os.environ.get("DB_PORT", "3306"))
 DB_USER = os.environ.get("DB_USER", "root")
@@ -67,15 +67,6 @@ POS_EXE = os.environ.get("POS_EXE", r"C:\Program Files\Pecan Solutions\Pecan POS
 POS_DIR = os.environ.get("POS_DIR", r"C:\Program Files\Pecan Solutions\Pecan POS")
 PSEXEC_PATH = os.environ.get("PSEXEC_PATH", r"C:\tools\PsExec64.exe")
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "5"))
-
-HEADERS = {
-    "apikey": SUPABASE_KEY,
-    "Authorization": f"Bearer {SUPABASE_KEY}",
-    "Content-Type": "application/json",
-    "Prefer": "return=minimal",
-    "Accept-Profile": "demo_builder",
-    "Content-Profile": "demo_builder",
-}
 
 # ---------------------------------------------------------------------------
 # SSH helpers
@@ -103,22 +94,62 @@ def ssh_available(host, user=None):
     return ok and "ok" in out
 
 # ---------------------------------------------------------------------------
-# Supabase helpers
+# Turso helpers
 # ---------------------------------------------------------------------------
 
-def supabase_get(table, params=None):
-    """GET from Supabase REST API."""
-    url = f"{SUPABASE_URL}/rest/v1/{table}"
-    r = requests.get(url, headers={**HEADERS, "Accept": "application/json"},
-                     params=params, timeout=10)
-    r.raise_for_status()
-    return r.json()
+def _turso_arg(v):
+    """Convert a Python value to a Turso typed argument."""
+    if v is None:
+        return {"type": "null"}
+    if isinstance(v, bool):
+        return {"type": "integer", "value": str(int(v))}
+    if isinstance(v, int):
+        return {"type": "integer", "value": str(v)}
+    if isinstance(v, float):
+        return {"type": "float", "value": str(v)}
+    return {"type": "text", "value": str(v)}
 
-def supabase_patch(table, match, data):
-    """PATCH a row in Supabase."""
-    url = f"{SUPABASE_URL}/rest/v1/{table}"
-    r = requests.patch(url, headers=HEADERS, params=match, json=data, timeout=10)
+def turso_execute(sql, args=None):
+    """Execute a single SQL statement against Turso. Returns affected_rows_count."""
+    stmt = {"sql": sql}
+    if args:
+        stmt["args"] = [_turso_arg(a) for a in args]
+    payload = {"requests": [{"type": "execute", "stmt": stmt}, {"type": "close"}]}
+    r = requests.post(
+        f"{TURSO_DATABASE_URL}/v2/pipeline",
+        headers={"Authorization": f"Bearer {TURSO_AUTH_TOKEN}", "Content-Type": "application/json"},
+        json=payload, timeout=10,
+    )
     r.raise_for_status()
+    result = r.json()
+    res = result["results"][0]
+    if res.get("type") == "error":
+        raise RuntimeError(res.get("error", {}).get("message", "Turso error"))
+    return res.get("response", {}).get("result", {}).get("affected_rows_count", 0)
+
+def turso_query(sql, args=None):
+    """Query Turso and return list of dicts."""
+    stmt = {"sql": sql}
+    if args:
+        stmt["args"] = [_turso_arg(a) for a in args]
+    payload = {"requests": [{"type": "execute", "stmt": stmt}, {"type": "close"}]}
+    r = requests.post(
+        f"{TURSO_DATABASE_URL}/v2/pipeline",
+        headers={"Authorization": f"Bearer {TURSO_AUTH_TOKEN}", "Content-Type": "application/json"},
+        json=payload, timeout=10,
+    )
+    r.raise_for_status()
+    result = r.json()
+    res = result["results"][0]
+    if res.get("type") == "error":
+        raise RuntimeError(res.get("error", {}).get("message", "Turso error"))
+    data = res.get("response", {}).get("result", {})
+    cols = [c["name"] for c in data.get("cols", [])]
+    rows = []
+    for row in data.get("rows", []):
+        rows.append({cols[i]: (cell.get("value") if cell.get("type") != "null" else None)
+                     for i, cell in enumerate(row)})
+    return rows
 
 # ---------------------------------------------------------------------------
 # SQL Execution
@@ -398,10 +429,9 @@ def restart_pos(host, user=None, db_name=None):
 def process_queued():
     """Check for and process queued deployments."""
     try:
-        rows = supabase_get("sessions", {
-            "deploy_status": "eq.queued",
-            "select": "id,generated_sql,pending_images,deploy_target",
-        })
+        rows = turso_query(
+            "SELECT id, generated_sql, pending_images, deploy_target FROM sessions WHERE deploy_status = 'queued'",
+        )
     except Exception as e:
         print(f"[POLL] Error checking queue: {e}")
         return
@@ -409,17 +439,19 @@ def process_queued():
     for session in rows:
         sid = session["id"]
         sql = session.get("generated_sql", "")
-        pending_images = session.get("pending_images") or []
-        deploy_target = session.get("deploy_target")
+        pending_images_raw = session.get("pending_images") or "[]"
+        pending_images = json.loads(pending_images_raw) if isinstance(pending_images_raw, str) else pending_images_raw
+        deploy_target_raw = session.get("deploy_target")
+        deploy_target = json.loads(deploy_target_raw) if isinstance(deploy_target_raw, str) and deploy_target_raw else deploy_target_raw
 
         print(f"\n[DEPLOY] Processing session {sid[:8]}...")
 
         # Mark as executing
         try:
-            supabase_patch("sessions", {"id": f"eq.{sid}"}, {
-                "deploy_status": "executing",
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            })
+            turso_execute(
+                "UPDATE sessions SET deploy_status = 'executing', updated_at = ? WHERE id = ?",
+                [datetime.now(timezone.utc).isoformat(), sid],
+            )
         except Exception as e:
             print(f"  [ERROR] Could not update status: {e}")
             continue
@@ -463,11 +495,10 @@ def process_queued():
                 "pos_restarted": pos_result.get("pos_restarted", False),
                 "pos_running": pos_result.get("pos_running", False),
             }
-            supabase_patch("sessions", {"id": f"eq.{sid}"}, {
-                "deploy_status": "done",
-                "deploy_result": json.dumps(result),
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            })
+            turso_execute(
+                "UPDATE sessions SET deploy_status = 'done', deploy_result = ?, updated_at = ? WHERE id = ?",
+                [json.dumps(result), datetime.now(timezone.utc).isoformat(), sid],
+            )
             print(f"  [DONE] Success!")
 
         except Exception as e:
@@ -484,23 +515,22 @@ def process_queued():
                 "pos_running": False,
             }
             try:
-                supabase_patch("sessions", {"id": f"eq.{sid}"}, {
-                    "deploy_status": "failed",
-                    "deploy_result": json.dumps(result),
-                    "updated_at": datetime.now(timezone.utc).isoformat(),
-                })
+                turso_execute(
+                    "UPDATE sessions SET deploy_status = 'failed', deploy_result = ?, updated_at = ? WHERE id = ?",
+                    [json.dumps(result), datetime.now(timezone.utc).isoformat(), sid],
+                )
             except Exception:
                 print("  [ERROR] Could not update failure status")
 
 
 def main():
-    if not SUPABASE_URL or not SUPABASE_KEY:
-        print("ERROR: Set SUPABASE_URL and SUPABASE_KEY in .env")
+    if not TURSO_DATABASE_URL or not TURSO_AUTH_TOKEN:
+        print("ERROR: Set TURSO_DATABASE_URL and TURSO_AUTH_TOKEN in .env")
         sys.exit(1)
 
     ssh_host = SSH_HOST or DB_HOST
     print(f"Demo Builder Deploy Agent")
-    print(f"  Supabase: {SUPABASE_URL}")
+    print(f"  Turso:    {TURSO_DATABASE_URL}")
     print(f"  DB:       {DB_HOST}:{DB_PORT}/{DB_NAME}")
     print(f"  SSH:      {SSH_USER}@{ssh_host}")
     print(f"  Polling every {POLL_INTERVAL}s\n")
@@ -516,9 +546,10 @@ def main():
         process_queued()
         # Update heartbeat on the matching connection record
         try:
-            supabase_patch("connections", {"host": f"eq.{DB_HOST}"}, {
-                "agent_last_seen": datetime.now(timezone.utc).isoformat(),
-            })
+            turso_execute(
+                "UPDATE connections SET agent_last_seen = ? WHERE host = ?",
+                [datetime.now(timezone.utc).isoformat(), DB_HOST],
+            )
         except Exception:
             pass
         time.sleep(POLL_INTERVAL)
