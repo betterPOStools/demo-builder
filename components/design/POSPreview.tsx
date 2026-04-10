@@ -3,8 +3,24 @@
 import { useState, useMemo, useCallback } from "react";
 import { useStore } from "@/store";
 import { isLightColor } from "@/lib/utils";
+import {
+  BG_W,
+  BG_H,
+  SIDEBAR_W,
+  SIDEBAR_H,
+  SIDEBAR_X_OFFSET,
+  SIDEBAR_Y_OFFSET,
+} from "@/lib/splitBrandingImage";
 import type { ItemNode, GroupNode, ModifierTemplateNode } from "@/lib/types";
 import type { BrandingState } from "@/store/designSlice";
+
+// ---------- POS layout constants (percentages of 1024×716 frame) ----------
+// These match the real Pecan POS overlay model exactly so the preview shows
+// the seamless background ↔ sidebar relationship the operator will see in prod.
+const SIDEBAR_LEFT_PCT = (SIDEBAR_X_OFFSET / BG_W) * 100;
+const SIDEBAR_TOP_PCT = (SIDEBAR_Y_OFFSET / BG_H) * 100;
+const SIDEBAR_W_PCT = (SIDEBAR_W / BG_W) * 100;
+const SIDEBAR_H_PCT = (SIDEBAR_H / BG_H) * 100;
 
 // ---------- Types ----------
 
@@ -55,7 +71,7 @@ function MainScreen({
 
   return (
     <div
-      className="relative flex h-full items-center justify-center overflow-hidden"
+      className="relative h-full w-full overflow-hidden"
       style={{
         backgroundColor: bg,
         backgroundImage: branding.background_picture
@@ -65,26 +81,46 @@ function MainScreen({
         backgroundPosition: "center",
       }}
     >
-      {/* Sidebar */}
+      {/* Sidebar overlay — 360×696 at (10,10) of the 1024×716 canvas.
+          Matches the real POS overlay model exactly so the seam between the
+          sidebar crop and the background it came from is invisible. */}
       {branding.sidebar_picture && (
-        <div className="absolute left-0 top-0 h-full w-[70px] bg-[#0a0f1a]">
-          <img
-            src={branding.sidebar_picture}
-            alt=""
-            className="h-full w-full object-cover opacity-80"
-          />
-        </div>
+        <img
+          src={branding.sidebar_picture}
+          alt=""
+          className="absolute block object-cover"
+          style={{
+            top: `${SIDEBAR_TOP_PCT}%`,
+            left: `${SIDEBAR_LEFT_PCT}%`,
+            width: `${SIDEBAR_W_PCT}%`,
+            height: `${SIDEBAR_H_PCT}%`,
+          }}
+          draggable={false}
+        />
       )}
 
-      <div className="flex flex-wrap justify-center gap-5">
+      {/* Service buttons — positioned over the right area of the canvas,
+          clear of the sidebar overlay footprint */}
+      <div
+        className="absolute flex flex-wrap items-center justify-center gap-[2.5%]"
+        style={{
+          top: "10%",
+          left: `${SIDEBAR_LEFT_PCT + SIDEBAR_W_PCT + 3}%`,
+          right: "4%",
+          bottom: "10%",
+        }}
+      >
         {SERVICE_TYPES.map((s) => (
           <button
             key={s.key}
             onClick={onStart}
-            className="flex h-28 w-36 items-center justify-center rounded-2xl text-sm font-bold shadow-xl ring-2 ring-white/20 transition-all hover:scale-105 hover:brightness-110"
+            className="flex items-center justify-center rounded-2xl font-bold shadow-xl ring-2 ring-white/20 transition-all hover:scale-105 hover:brightness-110"
             style={{
               backgroundColor: btnBg || s.color,
               color: btnFg || "#ffffff",
+              width: "28%",
+              aspectRatio: "1.3 / 1",
+              fontSize: "clamp(10px, 1.6vw, 16px)",
             }}
           >
             {s.label}
@@ -593,8 +629,13 @@ export function POSPreview() {
           </span>
         </div>
 
-        {/* Screen */}
-        <div className="h-[500px] bg-[#0f172a]">
+        {/* Screen — locked to real POS aspect ratio (1024×716) so the sidebar
+            overlay and background render in the exact same proportions the
+            operator will see in production. */}
+        <div
+          className="mx-auto w-full bg-[#0f172a]"
+          style={{ aspectRatio: `${BG_W} / ${BG_H}`, maxWidth: `${BG_W}px` }}
+        >
           {screen === "main" ? (
             <MainScreen
               branding={branding}

@@ -26,7 +26,24 @@ import { useStore } from "@/store";
 import type { SavedBrandAnalysis } from "@/store/designSlice";
 import { isLightColor, generateId } from "@/lib/utils";
 import { htmlToPng } from "@/lib/htmlToPng";
-import { splitBrandingImage, splitFromBackground, splitUploadedImage } from "@/lib/splitBrandingImage";
+import {
+  splitBrandingImage,
+  splitFromBackground,
+  splitFromDataUri,
+  splitUploadedImage,
+  BG_W,
+  BG_H,
+  SIDEBAR_W,
+  SIDEBAR_H,
+  SIDEBAR_X_OFFSET,
+  SIDEBAR_Y_OFFSET,
+} from "@/lib/splitBrandingImage";
+
+// POS overlay-model percentages — keep in sync with POSPreview.tsx
+const SIDEBAR_LEFT_PCT = (SIDEBAR_X_OFFSET / BG_W) * 100;
+const SIDEBAR_TOP_PCT = (SIDEBAR_Y_OFFSET / BG_H) * 100;
+const SIDEBAR_W_PCT = (SIDEBAR_W / BG_W) * 100;
+const SIDEBAR_H_PCT = (SIDEBAR_H / BG_H) * 100;
 
 const TRANSPARENT = "rgba(0,0,0,0)";
 
@@ -374,7 +391,10 @@ export function BrandingEditor() {
       }
 
       setGenProgress("Splitting into sidebar + background...");
-      const { sidebarPng, backgroundPng } = await splitFromBackground(bgUri);
+      // Run the generated background through the same upload+split pipeline
+      // for consistency — sidebar is cropped from the same image so the
+      // overlay seam is invisible.
+      const { sidebarPng, backgroundPng } = await splitFromDataUri(bgUri);
 
       const ts = new Date().toISOString();
       const seamlessId = generateId();
@@ -951,31 +971,45 @@ export function BrandingEditor() {
                 <div className="h-2 w-2 rounded-full bg-green-500" />
                 <span className="ml-1.5 text-[9px] text-slate-600">POS Main Screen</span>
               </div>
-              {/* 35% scale: 1024×716 → ~358×251px. Sidebar: 360×696 → ~126×244px, 3px inset */}
+              {/* Real POS overlay model: background fills 1024×716, sidebar
+                  is overlaid at (10,10) sized 360×696 — sidebar pixels come
+                  from the same image so the seam is invisible. */}
               <div
                 className="relative overflow-hidden"
                 style={{
                   width: "100%",
-                  aspectRatio: "1024 / 716",
+                  aspectRatio: `${BG_W} / ${BG_H}`,
                   backgroundColor: bg,
                   backgroundImage: branding.background_picture ? `url(${branding.background_picture})` : undefined,
                   backgroundSize: "cover",
                   backgroundPosition: "center",
                 }}
               >
-                {/* Sidebar — 360/1024 wide, 696/716 tall, 3px from edges */}
+                {/* Sidebar overlay — exact POS coordinates */}
+                {branding.sidebar_picture && (
+                  <img
+                    src={branding.sidebar_picture}
+                    alt=""
+                    className="absolute block object-cover"
+                    style={{
+                      top: `${SIDEBAR_TOP_PCT}%`,
+                      left: `${SIDEBAR_LEFT_PCT}%`,
+                      width: `${SIDEBAR_W_PCT}%`,
+                      height: `${SIDEBAR_H_PCT}%`,
+                    }}
+                    draggable={false}
+                  />
+                )}
+                {/* Service buttons — positioned in the area to the right of
+                    the sidebar overlay footprint */}
                 <div
-                  className="absolute bg-[#0a0f1a]"
-                  style={{ left: 3, top: 3, bottom: 3, width: "31%" }}
-                >
-                  {branding.sidebar_picture ? (
-                    <img src={branding.sidebar_picture} alt="" className="h-full w-full object-cover" />
-                  ) : null}
-                </div>
-                {/* Button area — to the right of sidebar */}
-                <div
-                  className="absolute top-0 h-full flex flex-wrap content-center justify-center gap-1 p-2"
-                  style={{ left: "38%", right: 0 }}
+                  className="absolute flex flex-wrap content-center justify-center gap-1 p-2"
+                  style={{
+                    top: 0,
+                    bottom: 0,
+                    left: `${SIDEBAR_LEFT_PCT + SIDEBAR_W_PCT + 2}%`,
+                    right: "2%",
+                  }}
                 >
                   {PREVIEW_SERVICES.map((s) => {
                     const btnColor = btnBg || s.fallback;

@@ -114,7 +114,9 @@ export function DeployStatusCard() {
                     ? "POS restarted and running"
                     : deployResult.pos_restarted
                       ? "POS restarted — may need manual check"
-                      : "POS restart skipped (SSH not available)"}
+                      : deployResult.error
+                        ? `POS restart failed: ${deployResult.error}`
+                        : "POS restart skipped (SSH not available)"}
                 </div>
               )}
             </div>

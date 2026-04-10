@@ -1,22 +1,27 @@
 /**
- * Split a combined 1384×716 branding image into sidebar + background pieces.
+ * Split a 1024×716 background image into sidebar + background pieces.
  *
- * POS layout (left→right):
- *   Sidebar panel : 360px wide, image padded with equal margin top/bottom/left
- *   Background    : 1024px wide × 716px tall
+ * POS layout: the background fills the full 1024×716 area, and the sidebar
+ * panel is overlaid on top of the background's left edge with equal 10px
+ * padding on top, bottom, and left (no right padding — the panel butts up
+ * against the menu content).
  *
- * Sidebar image size  : 360×696  (716 - 20px vertical padding = 696)
- * Background img size : 1024×716
- * Combined canvas     : 1384×716
+ *   Background  : 1024 × 716  (full canvas)
+ *   Sidebar     :  360 × 696  positioned at (x=10, y=10), occupying
+ *                              x:10–370, y:10–706 of the background.
+ *
+ * Sidebar pixels are cropped directly from the background image so the
+ * overlay seam is invisible.
  */
 
 export const SIDEBAR_W = 360;
 export const SIDEBAR_H = 696;
 export const BG_W = 1024;
 export const BG_H = 716;
-export const COMBINED_W = SIDEBAR_W + BG_W; // 1384
-export const COMBINED_H = BG_H;             // 716
-export const SIDEBAR_Y_OFFSET = Math.floor((COMBINED_H - SIDEBAR_H) / 2); // 10
+export const COMBINED_W = SIDEBAR_W + BG_W; // legacy — used by old AutoPilot path
+export const COMBINED_H = BG_H;
+export const SIDEBAR_X_OFFSET = 10;
+export const SIDEBAR_Y_OFFSET = Math.floor((BG_H - SIDEBAR_H) / 2); // 10
 
 export interface SplitResult {
   sidebarPng: string;
@@ -72,7 +77,11 @@ export function splitFromBackground(bgDataUri: string): Promise<SplitResult> {
       sbCanvas.width = SIDEBAR_W;
       sbCanvas.height = SIDEBAR_H;
       const sbCtx = sbCanvas.getContext("2d")!;
-      sbCtx.drawImage(bgCanvas, 0, SIDEBAR_Y_OFFSET, SIDEBAR_W, SIDEBAR_H, 0, 0, SIDEBAR_W, SIDEBAR_H);
+      sbCtx.drawImage(
+        bgCanvas,
+        SIDEBAR_X_OFFSET, SIDEBAR_Y_OFFSET, SIDEBAR_W, SIDEBAR_H,
+        0, 0, SIDEBAR_W, SIDEBAR_H,
+      );
 
       resolve({
         sidebarPng: sbCanvas.toDataURL("image/png"),
@@ -85,41 +94,53 @@ export function splitFromBackground(bgDataUri: string): Promise<SplitResult> {
 }
 
 /**
- * Scale any user-supplied image to cover COMBINED_W × COMBINED_H, then split.
+ * Scale any image source to cover the background dimensions (1024×716),
+ * then crop the sidebar from the SAME image so the overlay is seamless.
+ *
+ * The POS renders the background full-width and overlays the sidebar on top
+ * at (SIDEBAR_X_OFFSET, SIDEBAR_Y_OFFSET) — so the sidebar pixels must come
+ * from the same region of the background image, not a separate slice.
  */
-export function splitUploadedImage(
-  file: File,
-  bgDarkness = 0,
-): Promise<SplitResult> {
+function splitFromHTMLImage(img: HTMLImageElement): Promise<SplitResult> {
+  // Scale to cover the background canvas (object-fit: cover behavior)
+  const scale = Math.max(BG_W / img.width, BG_H / img.height);
+  const sw = img.width * scale;
+  const sh = img.height * scale;
+  const sx = (BG_W - sw) / 2;
+  const sy = (BG_H - sh) / 2;
+
+  const bgCanvas = document.createElement("canvas");
+  bgCanvas.width = BG_W;
+  bgCanvas.height = BG_H;
+  const ctx = bgCanvas.getContext("2d")!;
+  ctx.drawImage(img, sx, sy, sw, sh);
+
+  return splitFromBackground(bgCanvas.toDataURL("image/png"));
+}
+
+export function splitUploadedImage(file: File): Promise<SplitResult> {
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(file);
     const img = new Image();
     img.onload = () => {
       URL.revokeObjectURL(url);
-
-      // Scale to cover combined canvas
-      const scale = Math.max(COMBINED_W / img.width, COMBINED_H / img.height);
-      const sw = img.width * scale;
-      const sh = img.height * scale;
-      const sx = (COMBINED_W - sw) / 2;
-      const sy = (COMBINED_H - sh) / 2;
-
-      const combined = document.createElement("canvas");
-      combined.width = COMBINED_W;
-      combined.height = COMBINED_H;
-      const ctx = combined.getContext("2d")!;
-      ctx.drawImage(img, sx, sy, sw, sh);
-
-      if (bgDarkness > 0) {
-        ctx.save();
-        ctx.fillStyle = `rgba(0,0,0,${bgDarkness})`;
-        ctx.fillRect(SIDEBAR_W, 0, BG_W, COMBINED_H);
-        ctx.restore();
-      }
-
-      splitBrandingImage(combined.toDataURL("image/png")).then(resolve).catch(reject);
+      splitFromHTMLImage(img).then(resolve).catch(reject);
     };
     img.onerror = reject;
     img.src = url;
+  });
+}
+
+/**
+ * Take an arbitrary data URI (e.g. fal-generated background) and run it
+ * through the same scale-to-cover + split pipeline used for uploaded images.
+ * If the source is already 1024×716 the scale step is a no-op.
+ */
+export function splitFromDataUri(dataUri: string): Promise<SplitResult> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => splitFromHTMLImage(img).then(resolve).catch(reject);
+    img.onerror = reject;
+    img.src = dataUri;
   });
 }

@@ -240,10 +240,10 @@ export async function POST(request: Request) {
     let falResult: Promise<CompareResult>;
 
     if (assetType === "seamless") {
-      // Full-frame composition — no focal bias. Sidebar will be cropped from the left edge client-side.
-      const seamlessPrompt = `${bgPromptBase} Full cinematic composition filling the entire frame. No text, no UI elements.`;
+      // Plain background — no focal point or composition hints. The sidebar
+      // overlay is cropped from this same image client-side via splitFromDataUri.
       falResult = fetchFalBackground(
-        seamlessPrompt,
+        bgPromptBase,
         width,
         height,
         brandTokens?.negative_prompt as string | undefined,

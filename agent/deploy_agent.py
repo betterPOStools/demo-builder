@@ -306,22 +306,27 @@ def restart_pos(host, user=None, db_name=None):
         print(f"  [POS] SSH not available at {user}@{host}")
         return result
 
-    # Optionally switch database in appsettings.json
+    # Optionally switch database in appsettings.json.
+    # Use -EncodedCommand (UTF-16LE base64) to bypass cmd.exe quoting/pipe issues
+    # entirely — cmd.exe just sees a single base64 token, no special chars.
     if db_name:
         appsettings = r"C:\Program Files\Pecan Solutions\Pecan POS\resources\api\appsettings.json"
-        ps_cmd = (
-            f'powershell.exe -NoProfile -Command "'
-            f"(Get-Content '{appsettings}') "
-            f"-replace 'Database=[^;]+?(?=[;\\\"])', 'Database={db_name}' "
-            f"| Set-Content '{appsettings}'"
-            f'"'
+        ps_script = (
+            f"$p='{appsettings}'; "
+            f"(Get-Content -Raw $p) "
+            f"-replace 'Database=[^;\"]+', 'Database={db_name}' "
+            f"| Set-Content -NoNewline $p"
         )
+        encoded = base64.b64encode(ps_script.encode("utf-16-le")).decode("ascii")
+        ps_cmd = f"powershell.exe -NoProfile -EncodedCommand {encoded}"
         ok, _, err = ssh_cmd(host, ps_cmd, user=user, timeout=15)
         if ok:
             print(f"  [POS] Updated appsettings.json → Database={db_name}")
             result["db_switched"] = db_name
         else:
-            print(f"  [POS] appsettings update skipped: {err[:80]}")
+            print(f"  [POS] appsettings update FAILED: {err[:160]}")
+            result["error"] = f"appsettings update failed: {err[:160]}"
+            return result
 
     # Kill POS (ignore "not found" — it may not be running)
     ok, out, err = ssh_cmd(host, 'taskkill /f /im "Pecan POS.exe"', user=user)
@@ -337,40 +342,52 @@ def restart_pos(host, user=None, db_name=None):
     # Ensure VBS launcher exists (hidden cmd window)
     ensure_restart_script(host, user)
 
-    # Detect the active console session ID dynamically (may be 1, 2, etc.)
+    # Detect the active console session ID dynamically (may be 1, 2, etc.).
+    # NOTE: `query session` can exit non-zero on success on some Windows builds, and
+    # may also write to stderr instead of stdout. So we parse whatever we can capture
+    # regardless of the return code.
     session_id = 1
-    ok_q, qout, _ = ssh_cmd(host, "query session", user=user, timeout=10)
-    if ok_q:
-        for line in qout.splitlines():
-            if "active" in line.lower() and "console" in line.lower():
-                parts = line.split()
-                for part in parts:
-                    if part.isdigit():
-                        session_id = int(part)
-                        break
+    _, qout, qerr = ssh_cmd(host, "query session", user=user, timeout=10)
+    combined = (qout + "\n" + qerr)
+    for line in combined.splitlines():
+        low = line.lower()
+        if "active" in low and "console" in low:
+            parts = line.split()
+            for part in parts:
+                if part.isdigit():
+                    session_id = int(part)
+                    break
+            break
     print(f"  [POS] Using interactive session {session_id}")
 
-    # Launch via PsExec into the active interactive session, elevated
-    # VBS wrapper hides the cmd window; --no-sandbox allows GPU from remote session
+    # Launch via PsExec into the active interactive session, elevated.
+    # VBS wrapper hides the cmd window; --no-sandbox allows GPU from remote session.
+    # NOTE: with -d, PsExec exits with the launched PID as exit code (non-zero),
+    # AND PsExec writes status to the console (CONOUT$) which subprocess can't always
+    # capture. So we don't trust ssh return codes or stdout/stderr parsing — instead
+    # we wait and verify via tasklist that the POS process is actually running.
     launch_cmd = f'{PSEXEC_PATH} -accepteula -i {session_id} -h -d C:\\Windows\\System32\\wscript.exe C:\\restart_pos.vbs'
-    ok, out, err = ssh_cmd(host, launch_cmd, user=user, timeout=15)
-    # PsExec writes to stderr even on success; check for "started on"
-    combined = (out + " " + err).lower()
-    if "started on" in combined:
-        print(f"  [POS] Launched POS via PsExec (session {session_id}, elevated, --no-sandbox)")
-        result["pos_restarted"] = True
-    else:
-        result["error"] = f"PsExec launch failed: {err[:200]}"
-        print(f"  [POS] PsExec launch failed: {err[:200]}")
-        return result
+    ssh_cmd(host, launch_cmd, user=user, timeout=30)
+    print(f"  [POS] PsExec invoked (session {session_id})")
 
-    # Wait and verify
-    time.sleep(8)
-    result["pos_running"] = pos_is_running(host, user)
-    if result["pos_running"]:
-        print(f"  [POS] Verified running in console session")
+    # Wait for Electron + .NET API to spin up, then verify via tasklist.
+    # Pecan POS is heavy: Electron main + renderer + GPU + utility + crashpad
+    # plus a bundled .NET API. On the demo tablet cold start can take 25-40s.
+    # Poll every 5s for up to 60s before giving up.
+    deadline = time.time() + 60
+    attempt = 0
+    while time.time() < deadline:
+        attempt += 1
+        time.sleep(5)
+        if pos_is_running(host, user):
+            result["pos_running"] = True
+            result["pos_restarted"] = True
+            print(f"  [POS] Verified POS running in session {session_id} (attempt {attempt})")
+            break
     else:
-        print(f"  [POS] Warning: process not detected after restart")
+        result["pos_running"] = False
+        result["error"] = "POS process not detected after PsExec launch (60s timeout)"
+        print(f"  [POS] POS not running after 60s — check tablet display")
 
     return result
 
