@@ -2,15 +2,16 @@
 """
 Demo Builder Deploy Agent
 ~~~~~~~~~~~~~~~~~~~~~~~~~
-Lightweight agent that runs on your laptop. Polls Supabase for queued deployments,
-executes SQL against MariaDB, pushes images via SCP, and restarts the POS via SSH.
+Runs on the Mac. Polls Supabase for queued deployments, executes the
+generated SQL against MariaDB on the demo tablet, pushes branding/item
+images via SCP, then restarts the POS via SSH + PsExec.
 
 Usage:
     python deploy_agent.py
 
 Environment variables (in .env):
     SUPABASE_URL        — Supabase project URL
-    SUPABASE_KEY        — Supabase service role key (or anon key)
+    SUPABASE_KEY        — Supabase service role key
     DB_HOST             — MariaDB host (default: 100.112.68.19)
     DB_PORT             — MariaDB port (default: 3306)
     DB_USER             — MariaDB user (default: root)
@@ -18,8 +19,8 @@ Environment variables (in .env):
     DB_NAME             — MariaDB database name (default: pecandemodb)
     SSH_HOST            — SSH host for image push + POS restart (default: DB_HOST)
     SSH_USER            — SSH user (default: admin)
-    POS_IMAGES_DIR      — POS images directory (default: C:\\Program Files\\Pecan Solutions\\Pecan POS\\images)
-    POS_EXE             — POS executable path (default: C:\\Program Files\\Pecan Solutions\\Pecan POS\\Pecan POS.exe)
+    POS_IMAGES_DIR      — POS images directory
+    PSEXEC_PATH         — Path to PsExec64.exe on the POS machine
     POLL_INTERVAL       — Seconds between polls (default: 5)
 """
 
@@ -53,19 +54,17 @@ def load_env():
 
 load_env()
 
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
-DB_HOST = os.environ.get("DB_HOST", "100.112.68.19")
-DB_PORT = int(os.environ.get("DB_PORT", "3306"))
-DB_USER = os.environ.get("DB_USER", "root")
-DB_PASSWORD = os.environ.get("DB_PASSWORD", "123456")
-DB_NAME = os.environ.get("DB_NAME", "pecandemodb")
-SSH_HOST = os.environ.get("SSH_HOST", "")  # defaults to DB_HOST
-SSH_USER = os.environ.get("SSH_USER", "admin")
+SUPABASE_URL  = os.environ.get("SUPABASE_URL", "")
+SUPABASE_KEY  = os.environ.get("SUPABASE_KEY", "")
+DB_HOST       = os.environ.get("DB_HOST", "100.112.68.19")
+DB_PORT       = int(os.environ.get("DB_PORT", "3306"))
+DB_USER       = os.environ.get("DB_USER", "root")
+DB_PASSWORD   = os.environ.get("DB_PASSWORD", "123456")
+DB_NAME       = os.environ.get("DB_NAME", "pecandemodb")
+SSH_HOST      = os.environ.get("SSH_HOST", "")   # defaults to DB_HOST if empty
+SSH_USER      = os.environ.get("SSH_USER", "admin")
 POS_IMAGES_DIR = os.environ.get("POS_IMAGES_DIR", r"C:\Program Files\Pecan Solutions\Pecan POS\images")
-POS_EXE = os.environ.get("POS_EXE", r"C:\Program Files\Pecan Solutions\Pecan POS\Pecan POS.exe")
-POS_DIR = os.environ.get("POS_DIR", r"C:\Program Files\Pecan Solutions\Pecan POS")
-PSEXEC_PATH = os.environ.get("PSEXEC_PATH", r"C:\tools\PsExec64.exe")
+PSEXEC_PATH   = os.environ.get("PSEXEC_PATH", r"C:\tools\PsExec64.exe")
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "5"))
 
 HEADERS = {
@@ -98,7 +97,7 @@ def ssh_cmd(host, cmd, user=None, timeout=10):
 
 
 def ssh_available(host, user=None):
-    """Check if SSH is reachable."""
+    """Check if SSH is reachable. Returns bool."""
     ok, out, _ = ssh_cmd(host, "echo ok", user=user, timeout=6)
     return ok and "ok" in out
 
@@ -107,15 +106,16 @@ def ssh_available(host, user=None):
 # ---------------------------------------------------------------------------
 
 def supabase_get(table, params=None):
-    """GET from Supabase REST API."""
+    """GET rows from Supabase REST API. Raises on HTTP error."""
     url = f"{SUPABASE_URL}/rest/v1/{table}"
     r = requests.get(url, headers={**HEADERS, "Accept": "application/json"},
                      params=params, timeout=10)
     r.raise_for_status()
     return r.json()
 
+
 def supabase_patch(table, match, data):
-    """PATCH a row in Supabase."""
+    """PATCH a row in Supabase. Raises on HTTP error."""
     url = f"{SUPABASE_URL}/rest/v1/{table}"
     r = requests.patch(url, headers=HEADERS, params=match, json=data, timeout=10)
     r.raise_for_status()
@@ -125,19 +125,12 @@ def supabase_patch(table, match, data):
 # ---------------------------------------------------------------------------
 
 def execute_sql(sql, deploy_target=None):
-    """Execute SQL against MariaDB. Returns rows affected."""
-    host = DB_HOST
-    port = DB_PORT
-    user = DB_USER
-    password = DB_PASSWORD
-    database = DB_NAME
-
-    if deploy_target:
-        host = deploy_target.get("host", host)
-        port = deploy_target.get("port", port)
-        user = deploy_target.get("user", user)
-        password = deploy_target.get("password", password)
-        database = deploy_target.get("database", database)
+    """Execute generated SQL against MariaDB. Returns total rows affected."""
+    host     = (deploy_target or {}).get("host",     DB_HOST)
+    port     = (deploy_target or {}).get("port",     DB_PORT)
+    user     = (deploy_target or {}).get("user",     DB_USER)
+    password = (deploy_target or {}).get("password", DB_PASSWORD)
+    database = (deploy_target or {}).get("database", DB_NAME)
 
     conn = mysql.connector.connect(
         host=host, port=port, user=user, password=password,
@@ -151,26 +144,33 @@ def execute_sql(sql, deploy_target=None):
         cursor.execute("SET FOREIGN_KEY_CHECKS=0")
 
         for stmt in sql.split(";"):
-            # Strip leading comment lines (-- ...) to get to the actual SQL
+            # Strip comment-only lines before checking for emptiness
             lines = stmt.strip().splitlines()
-            sql_lines = [l for l in lines if not l.strip().startswith("--")]
-            stmt = "\n".join(sql_lines).strip()
+            code_lines = [l for l in lines if not l.strip().startswith("--")]
+            stmt = "\n".join(code_lines).strip()
             if not stmt:
                 continue
             try:
                 cursor.execute(stmt)
-                total_rows += cursor.rowcount if cursor.rowcount > 0 else 0
+                if cursor.rowcount > 0:
+                    total_rows += cursor.rowcount
             except mysql.connector.Error as e:
-                print(f"  [WARN] Statement failed: {e.msg[:100]}")
+                print(f"  [WARN] Statement failed: {e.msg[:120]}")
 
         cursor.execute("SET FOREIGN_KEY_CHECKS=1")
         conn.commit()
+
     except Exception:
+        try:
+            cursor.execute("SET FOREIGN_KEY_CHECKS=1")  # restore before rollback
+        except Exception:
+            pass
         try:
             conn.rollback()
         except Exception:
             pass
         raise
+
     finally:
         try:
             cursor.close()
@@ -184,25 +184,26 @@ def execute_sql(sql, deploy_target=None):
     return total_rows
 
 # ---------------------------------------------------------------------------
-# Image Push (SSH/SCP)
+# Image Push (SCP)
 # ---------------------------------------------------------------------------
 
 def push_images_scp(pending_images, host, user=None):
-    """Download images from URLs and push to POS via SCP."""
+    """Download images (from URL or data URI) and push to POS via SCP."""
     user = user or SSH_USER
     pushed = 0
     failed = 0
 
     for img in pending_images:
+        tmp_path = None
         try:
             image_url = img.get("image_url") or img.get("imageUrl")
             dest_path = img.get("dest_path") or img.get("destPath")
             if not image_url or not dest_path:
+                print(f"  [IMG] Skipping entry with missing url or dest_path: {img.get('name', '?')}")
                 continue
 
-            # Get image bytes — either decode data URI or download from URL
+            # Fetch bytes — data URI or HTTP URL
             if image_url.startswith("data:"):
-                # data:image/png;base64,iVBOR...
                 _, b64_data = image_url.split(",", 1)
                 raw_bytes = base64.b64decode(b64_data)
             else:
@@ -210,32 +211,30 @@ def push_images_scp(pending_images, host, user=None):
                 r.raise_for_status()
                 raw_bytes = r.content
 
-            with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(dest_path)[1]) as tmp:
+            # Write to a local temp file, then SCP it
+            suffix = os.path.splitext(dest_path)[1] or ".png"
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
                 tmp.write(raw_bytes)
                 tmp_path = tmp.name
 
-            # Determine remote path — put in images root or a subfolder
             remote_path = f"{POS_IMAGES_DIR}\\{dest_path}"
 
-            # Ensure subdirectory exists on POS (e.g., Background\, Sidebar\)
-            if "\\" in dest_path or "/" in dest_path:
-                subdir = os.path.dirname(dest_path).replace("/", "\\")
+            # Create subdirectory on POS if needed (one level, e.g. Background\)
+            subdir = os.path.dirname(dest_path).replace("/", "\\")
+            if subdir:
                 remote_dir = f"{POS_IMAGES_DIR}\\{subdir}"
-                ssh_cmd(host, f'if not exist "{remote_dir}" mkdir "{remote_dir}"', user=user, timeout=5)
-
-            scp_dest = f"{user}@{host}:\"{remote_path}\""
+                ssh_cmd(host, f'if not exist "{remote_dir}" mkdir "{remote_dir}"',
+                        user=user, timeout=5)
 
             result = subprocess.run(
                 ["scp", "-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=no",
-                 tmp_path, scp_dest],
+                 tmp_path, f'{user}@{host}:"{remote_path}"'],
                 capture_output=True, text=True, timeout=30,
             )
 
-            os.unlink(tmp_path)
-
             if result.returncode == 0:
                 pushed += 1
-                print(f"  [IMG] SCP pushed: {dest_path}")
+                print(f"  [IMG] Pushed: {dest_path}")
             else:
                 failed += 1
                 print(f"  [IMG] SCP failed {dest_path}: {result.stderr.strip()}")
@@ -244,70 +243,99 @@ def push_images_scp(pending_images, host, user=None):
             failed += 1
             print(f"  [IMG] Failed {img.get('name', '?')}: {e}")
 
+        finally:
+            # Always clean up temp file, even on exception
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
+
     return pushed, failed
 
 # ---------------------------------------------------------------------------
-# POS Restart (SSH)
+# POS Restart (SSH + PsExec)
 # ---------------------------------------------------------------------------
 
 def pos_is_running(host, user=None):
-    """Check if POS process is running via SSH."""
+    """Return True if 'Pecan POS.exe' appears in the remote tasklist."""
     ok, out, _ = ssh_cmd(host, 'tasklist /fi "imagename eq Pecan POS.exe" /fo csv /nh', user=user)
     return ok and "Pecan POS.exe" in out
 
 
-def ensure_restart_script(host, user=None):
-    """Ensure the POS restart VBS script exists on the remote host.
+def deploy_restart_script(host, user=None):
+    """Always write (overwrite) the VBS launcher to the POS.
 
-    Uses a VBS wrapper to launch POS via cmd with window style 0 (hidden),
-    so no black cmd.exe window appears on screen.
+    We unconditionally overwrite rather than checking existence so a stale or
+    corrupt VBS is never left in place. The VBS hides the cmd window and chains
+    cd → launch so the POS finds its own resources directory.
     """
-    check = 'if exist C:\\restart_pos.vbs echo EXISTS'
-    ok, out, _ = ssh_cmd(host, check, user=user, timeout=5)
-    if ok and "EXISTS" in out:
-        return True
-    # Create via SCP from a temp file
-    import tempfile as _tf
+    user = user or SSH_USER
     vbs = (
         'Set WshShell = CreateObject("WScript.Shell")\r\n'
         'WshShell.Run "cmd /c cd /d ""C:\\Program Files\\Pecan Solutions\\Pecan POS"" && ""Pecan POS.exe"" --no-sandbox", 0, False\r\n'
     )
-    with _tf.NamedTemporaryFile(mode="w", suffix=".vbs", delete=False) as f:
-        f.write(vbs)
-        tmp = f.name
+    tmp_path = None
     try:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".vbs", delete=False) as f:
+            f.write(vbs)
+            tmp_path = f.name
+
         result = subprocess.run(
             ["scp", "-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=no",
-             tmp, f"{user}@{host}:C:/restart_pos.vbs"],
+             tmp_path, f"{user}@{host}:C:/restart_pos.vbs"],
             capture_output=True, text=True, timeout=10,
         )
-        return result.returncode == 0
+        if result.returncode == 0:
+            print(f"  [POS] Restart script deployed")
+            return True
+        else:
+            print(f"  [POS] Failed to deploy restart script: {result.stderr.strip()}")
+            return False
+
     except Exception as e:
-        print(f"  [POS] Failed to create restart script: {e}")
+        print(f"  [POS] Failed to deploy restart script: {e}")
         return False
+
     finally:
-        os.unlink(tmp)
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+
+
+def get_active_session_id(host, user=None):
+    """Return the active console session ID on the remote Windows host.
+
+    `query session` exits non-zero on some Windows builds and may write to
+    stderr instead of stdout — parse both regardless of return code.
+    """
+    _, qout, qerr = ssh_cmd(host, "query session", user=user, timeout=10)
+    for line in (qout + "\n" + qerr).splitlines():
+        low = line.lower()
+        if "active" in low and "console" in low:
+            for part in line.split():
+                if part.isdigit():
+                    return int(part)
+    return 1  # safe default
 
 
 def restart_pos(host, user=None, db_name=None):
-    """Restart the POS via SSH: taskkill → PsExec relaunch. Returns result dict.
+    """Kill and relaunch the POS via SSH + PsExec. Returns a result dict.
 
-    Uses PsExec64.exe -i 1 -h to launch the Electron app in the interactive
-    desktop session with elevation. The --no-sandbox flag allows the GPU
-    process to access the display adapter when launched remotely.
-    A VBS wrapper hides the cmd.exe window so only the POS GUI shows.
+    PsExec -i {session} -h -d launches wscript in the interactive desktop
+    session with elevation. --no-sandbox lets Electron access the GPU adapter
+    from a remote session context. The VBS wrapper hides the cmd.exe window.
+
+    Note: PsExec -d exits with the launched PID as its exit code (non-zero),
+    so we ignore the SSH return code and verify via tasklist instead.
     """
     user = user or SSH_USER
     result = {"method": "psexec", "pos_restarted": False, "pos_running": False}
 
-    if not ssh_available(host, user):
-        result["error"] = "SSH not available"
-        print(f"  [POS] SSH not available at {user}@{host}")
-        return result
-
-    # Optionally switch database in appsettings.json.
-    # Use -EncodedCommand (UTF-16LE base64) to bypass cmd.exe quoting/pipe issues
-    # entirely — cmd.exe just sees a single base64 token, no special chars.
+    # Optionally switch the database in appsettings.json before restart.
+    # Use -EncodedCommand (UTF-16LE base64) to avoid cmd.exe quoting issues.
     if db_name:
         appsettings = r"C:\Program Files\Pecan Solutions\Pecan POS\resources\api\appsettings.json"
         ps_script = (
@@ -317,62 +345,41 @@ def restart_pos(host, user=None, db_name=None):
             f"| Set-Content -NoNewline $p"
         )
         encoded = base64.b64encode(ps_script.encode("utf-16-le")).decode("ascii")
-        ps_cmd = f"powershell.exe -NoProfile -EncodedCommand {encoded}"
-        ok, _, err = ssh_cmd(host, ps_cmd, user=user, timeout=15)
+        ok, _, err = ssh_cmd(host, f"powershell.exe -NoProfile -EncodedCommand {encoded}",
+                             user=user, timeout=15)
         if ok:
-            print(f"  [POS] Updated appsettings.json → Database={db_name}")
+            print(f"  [POS] appsettings.json → Database={db_name}")
             result["db_switched"] = db_name
         else:
             print(f"  [POS] appsettings update FAILED: {err[:160]}")
             result["error"] = f"appsettings update failed: {err[:160]}"
             return result
 
-    # Kill POS (ignore "not found" — it may not be running)
+    # Kill — "not found" is fine, POS may already be stopped
     ok, out, err = ssh_cmd(host, 'taskkill /f /im "Pecan POS.exe"', user=user)
     if ok:
-        print(f"  [POS] Killed POS process")
-    elif "not found" in (err + out).lower():
-        print(f"  [POS] POS was not running")
+        print("  [POS] Killed existing POS process")
+    elif "not found" in (out + err).lower():
+        print("  [POS] POS was not running")
     else:
-        print(f"  [POS] taskkill: {err or out}")
+        print(f"  [POS] taskkill output: {(err or out)[:80]}")
 
     time.sleep(2)
 
-    # Ensure VBS launcher exists (hidden cmd window)
-    ensure_restart_script(host, user)
+    # Always (re)deploy the VBS — never trust a pre-existing copy
+    deploy_restart_script(host, user)
 
-    # Detect the active console session ID dynamically (may be 1, 2, etc.).
-    # NOTE: `query session` can exit non-zero on success on some Windows builds, and
-    # may also write to stderr instead of stdout. So we parse whatever we can capture
-    # regardless of the return code.
-    session_id = 1
-    _, qout, qerr = ssh_cmd(host, "query session", user=user, timeout=10)
-    combined = (qout + "\n" + qerr)
-    for line in combined.splitlines():
-        low = line.lower()
-        if "active" in low and "console" in low:
-            parts = line.split()
-            for part in parts:
-                if part.isdigit():
-                    session_id = int(part)
-                    break
-            break
-    print(f"  [POS] Using interactive session {session_id}")
+    # Detect active session
+    session_id = get_active_session_id(host, user)
+    print(f"  [POS] Launching via PsExec (session {session_id})...")
 
-    # Launch via PsExec into the active interactive session, elevated.
-    # VBS wrapper hides the cmd window; --no-sandbox allows GPU from remote session.
-    # NOTE: with -d, PsExec exits with the launched PID as exit code (non-zero),
-    # AND PsExec writes status to the console (CONOUT$) which subprocess can't always
-    # capture. So we don't trust ssh return codes or stdout/stderr parsing — instead
-    # we wait and verify via tasklist that the POS process is actually running.
-    launch_cmd = f'{PSEXEC_PATH} -accepteula -i {session_id} -h -d C:\\Windows\\System32\\wscript.exe C:\\restart_pos.vbs'
+    launch_cmd = (
+        f'{PSEXEC_PATH} -accepteula -i {session_id} -h -d '
+        r'C:\Windows\System32\wscript.exe C:\restart_pos.vbs'
+    )
     ssh_cmd(host, launch_cmd, user=user, timeout=30)
-    print(f"  [POS] PsExec invoked (session {session_id})")
 
-    # Wait for Electron + .NET API to spin up, then verify via tasklist.
-    # Pecan POS is heavy: Electron main + renderer + GPU + utility + crashpad
-    # plus a bundled .NET API. On the demo tablet cold start can take 25-40s.
-    # Poll every 5s for up to 60s before giving up.
+    # Poll for up to 60s — Electron + .NET cold start takes 25-40s on the tablet
     deadline = time.time() + 60
     attempt = 0
     while time.time() < deadline:
@@ -381,78 +388,71 @@ def restart_pos(host, user=None, db_name=None):
         if pos_is_running(host, user):
             result["pos_running"] = True
             result["pos_restarted"] = True
-            print(f"  [POS] Verified POS running in session {session_id} (attempt {attempt})")
+            print(f"  [POS] Running (confirmed after {attempt * 5}s)")
             break
     else:
         result["pos_running"] = False
-        result["error"] = "POS process not detected after PsExec launch (60s timeout)"
-        print(f"  [POS] POS not running after 60s — check tablet display")
+        result["error"] = "POS not detected after 60s — check tablet display for UAC prompt"
+        print(f"  [POS] Not running after 60s — may need UAC approval on tablet")
 
     return result
 
 # ---------------------------------------------------------------------------
-# Main loop
+# Main deploy loop
 # ---------------------------------------------------------------------------
 
 def process_queued():
-    """Check for and process queued deployments."""
+    """Poll Supabase for queued sessions and process each one."""
     try:
         rows = supabase_get("sessions", {
             "deploy_status": "eq.queued",
             "select": "id,generated_sql,pending_images,deploy_target",
         })
     except Exception as e:
-        print(f"[POLL] Error checking queue: {e}")
+        print(f"[POLL] Supabase error: {e}")
         return
 
     for session in rows:
-        sid = session["id"]
-        sql = session.get("generated_sql", "")
-        pending_images = session.get("pending_images") or []
+        sid    = session["id"]
+        sql    = session.get("generated_sql", "")
+        images = session.get("pending_images") or []
         deploy_target = session.get("deploy_target")
 
-        print(f"\n[DEPLOY] Processing session {sid[:8]}...")
+        print(f"\n[DEPLOY] Session {sid[:8]}  ({len(images)} image(s))")
 
-        # Mark as executing
+        # Claim the session immediately so parallel agents don't double-process
         try:
             supabase_patch("sessions", {"id": f"eq.{sid}"}, {
                 "deploy_status": "executing",
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             })
         except Exception as e:
-            print(f"  [ERROR] Could not update status: {e}")
+            print(f"  [ERROR] Could not claim session: {e}")
             continue
 
-        # Resolve SSH host from deploy target
         target_host = (deploy_target or {}).get("host", DB_HOST)
-        ssh_host = (deploy_target or {}).get("ssh_host", SSH_HOST or target_host)
-        ssh_user = (deploy_target or {}).get("ssh_user", SSH_USER)
-        target_db = (deploy_target or {}).get("database", DB_NAME)
+        ssh_host    = (deploy_target or {}).get("ssh_host", SSH_HOST or target_host)
+        ssh_user    = (deploy_target or {}).get("ssh_user", SSH_USER)
+        target_db   = (deploy_target or {}).get("database", DB_NAME)
 
         try:
-            # Execute SQL
+            # 1. Execute SQL
             rows_affected = execute_sql(sql, deploy_target)
             print(f"  [SQL] {rows_affected} rows affected")
 
-            # Push images via SCP
+            # 2. Push images + restart POS — single SSH availability check
             images_pushed, images_failed = 0, 0
-            if pending_images:
-                if ssh_available(ssh_host, ssh_user):
-                    images_pushed, images_failed = push_images_scp(
-                        pending_images, ssh_host, ssh_user,
-                    )
-                else:
-                    print(f"  [IMG] SSH not available — skipping image push")
-
-            # Restart POS
             pos_result = {}
+
             if ssh_available(ssh_host, ssh_user):
+                if images:
+                    images_pushed, images_failed = push_images_scp(images, ssh_host, ssh_user)
                 pos_result = restart_pos(ssh_host, ssh_user, db_name=target_db)
             else:
-                print(f"  [POS] SSH not available — skipping POS restart")
+                print(f"  [SSH] Not available at {ssh_user}@{ssh_host} — skipping images + restart")
 
-            # Mark done
-            result = {
+            # 3. Mark done
+            deploy_result = {
                 "ok": True,
                 "rows_affected": rows_affected,
                 "error": None,
@@ -464,62 +464,74 @@ def process_queued():
             }
             supabase_patch("sessions", {"id": f"eq.{sid}"}, {
                 "deploy_status": "done",
-                "deploy_result": json.dumps(result),
+                "deploy_result": json.dumps(deploy_result),
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             })
-            print(f"  [DONE] Success!")
+            print(f"  [DONE] ✓")
 
         except Exception as e:
             print(f"  [FAIL] {e}")
             traceback.print_exc()
-            result = {
-                "ok": False,
-                "rows_affected": 0,
-                "error": str(e)[:500],
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "images_pushed": 0,
-                "images_failed": 0,
-                "pos_restarted": False,
-                "pos_running": False,
-            }
             try:
                 supabase_patch("sessions", {"id": f"eq.{sid}"}, {
                     "deploy_status": "failed",
-                    "deploy_result": json.dumps(result),
+                    "deploy_result": json.dumps({
+                        "ok": False,
+                        "rows_affected": 0,
+                        "error": str(e)[:500],
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "images_pushed": 0,
+                        "images_failed": 0,
+                        "pos_restarted": False,
+                        "pos_running": False,
+                    }),
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 })
             except Exception:
-                print("  [ERROR] Could not update failure status")
+                print("  [ERROR] Could not write failure status to Supabase")
 
 
 def main():
     if not SUPABASE_URL or not SUPABASE_KEY:
-        print("ERROR: Set SUPABASE_URL and SUPABASE_KEY in .env")
+        print("ERROR: SUPABASE_URL and SUPABASE_KEY must be set in agent/.env")
         sys.exit(1)
 
     ssh_host = SSH_HOST or DB_HOST
-    print(f"Demo Builder Deploy Agent")
-    print(f"  Supabase: {SUPABASE_URL}")
-    print(f"  DB:       {DB_HOST}:{DB_PORT}/{DB_NAME}")
-    print(f"  SSH:      {SSH_USER}@{ssh_host}")
-    print(f"  Polling every {POLL_INTERVAL}s\n")
+    print("Demo Builder Deploy Agent")
+    print(f"  Supabase : {SUPABASE_URL}")
+    print(f"  MariaDB  : {DB_HOST}:{DB_PORT}/{DB_NAME}")
+    print(f"  SSH      : {SSH_USER}@{ssh_host}")
+    print(f"  Poll     : every {POLL_INTERVAL}s")
+    print()
 
-    # Check SSH on startup
     if ssh_available(ssh_host):
         print(f"  SSH: connected to {ssh_host}")
     else:
-        print(f"  SSH: NOT available at {ssh_host} — image push and POS restart disabled")
+        print(f"  SSH: NOT available — image push and POS restart will be skipped")
     print()
 
+    consecutive_errors = 0
+
     while True:
-        process_queued()
-        # Update heartbeat on the matching connection record
         try:
-            supabase_patch("connections", {"host": f"eq.{DB_HOST}"}, {
-                "agent_last_seen": datetime.now(timezone.utc).isoformat(),
-            })
-        except Exception:
-            pass
+            process_queued()
+            consecutive_errors = 0
+
+            # Heartbeat: update agent_last_seen on the connection record for this host
+            try:
+                supabase_patch("connections", {"host": f"eq.{DB_HOST}"}, {
+                    "agent_last_seen": datetime.now(timezone.utc).isoformat(),
+                })
+            except Exception:
+                pass  # heartbeat failure is non-fatal
+
+        except Exception as e:
+            consecutive_errors += 1
+            backoff = min(60, POLL_INTERVAL * (2 ** consecutive_errors))
+            print(f"[POLL] Unhandled error (#{consecutive_errors}): {e} — backing off {backoff}s")
+            time.sleep(backoff)
+            continue
+
         time.sleep(POLL_INTERVAL)
 
 
