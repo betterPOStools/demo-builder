@@ -1,5 +1,5 @@
 /**
- * Split branding images into sidebar + background pieces.
+ * Split a combined 1384×716 branding image into sidebar + background pieces.
  *
  * POS layout (left→right):
  *   Sidebar panel : 360px wide, image padded with equal margin top/bottom/left
@@ -24,7 +24,7 @@ export interface SplitResult {
 }
 
 /**
- * Crop a 1384×716 combined image into sidebar (left 360×696) + background (right 1024×716).
+ * Crop a PNG data URI (must be COMBINED_W × COMBINED_H) into the two POS assets.
  */
 export function splitBrandingImage(fullDataUri: string): Promise<SplitResult> {
   return new Promise((resolve, reject) => {
@@ -62,14 +62,12 @@ export function splitFromBackground(bgDataUri: string): Promise<SplitResult> {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.onload = () => {
-      // Background: scale-fill to BG_W × BG_H
       const bgCanvas = document.createElement("canvas");
       bgCanvas.width = BG_W;
       bgCanvas.height = BG_H;
       const bgCtx = bgCanvas.getContext("2d")!;
       bgCtx.drawImage(img, 0, 0, BG_W, BG_H);
 
-      // Sidebar: crop left SIDEBAR_W × SIDEBAR_H from the background, vertically centred
       const sbCanvas = document.createElement("canvas");
       sbCanvas.width = SIDEBAR_W;
       sbCanvas.height = SIDEBAR_H;
@@ -89,7 +87,10 @@ export function splitFromBackground(bgDataUri: string): Promise<SplitResult> {
 /**
  * Scale any user-supplied image to cover COMBINED_W × COMBINED_H, then split.
  */
-export function splitUploadedImage(file: File): Promise<SplitResult> {
+export function splitUploadedImage(
+  file: File,
+  bgDarkness = 0,
+): Promise<SplitResult> {
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(file);
     const img = new Image();
@@ -108,6 +109,13 @@ export function splitUploadedImage(file: File): Promise<SplitResult> {
       combined.height = COMBINED_H;
       const ctx = combined.getContext("2d")!;
       ctx.drawImage(img, sx, sy, sw, sh);
+
+      if (bgDarkness > 0) {
+        ctx.save();
+        ctx.fillStyle = `rgba(0,0,0,${bgDarkness})`;
+        ctx.fillRect(SIDEBAR_W, 0, BG_W, COMBINED_H);
+        ctx.restore();
+      }
 
       splitBrandingImage(combined.toDataURL("image/png")).then(resolve).catch(reject);
     };
