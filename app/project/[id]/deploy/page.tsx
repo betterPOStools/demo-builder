@@ -10,6 +10,9 @@ import {
   Zap,
   Plus,
   Wifi,
+  ImageIcon,
+  ChevronDown,
+  ChevronUp,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -33,6 +36,7 @@ import { ConnectionForm } from "@/components/deploy/ConnectionForm";
 import { ConnectionStatus } from "@/components/deploy/ConnectionStatus";
 import { toast } from "sonner";
 import type { SavedConnection } from "@/lib/types";
+import type { PendingImageTransfer } from "@/lib/types/deploy";
 
 export default function DeployPage({
   params,
@@ -66,6 +70,9 @@ export default function DeployPage({
 
   const [isGenerating, setIsGenerating] = useState(false);
   const [showConnectionForm, setShowConnectionForm] = useState(false);
+  const [pendingImages, setPendingImages] = useState<PendingImageTransfer[]>([]);
+  const [selectedImageKeys, setSelectedImageKeys] = useState<Set<string>>(new Set());
+  const [showImagePanel, setShowImagePanel] = useState(false);
 
   // Load connections on mount
   useEffect(() => {
@@ -166,7 +173,10 @@ export default function DeployPage({
       }
 
       const data = await res.json();
-      setStagedDeploy(data.sql, data.stats, data.pendingImageTransfers || []);
+      const transfers: PendingImageTransfer[] = data.pendingImageTransfers || [];
+      setStagedDeploy(data.sql, data.stats, transfers);
+      setPendingImages(transfers);
+      setSelectedImageKeys(new Set(transfers.map((img: PendingImageTransfer) => img.entity_id)));
       toast.success(
         `SQL generated: ${data.stats.menuItems} items, ${data.stats.groups} groups`,
       );
@@ -228,7 +238,10 @@ export default function DeployPage({
         });
         if (!res.ok) throw new Error("SQL generation failed");
         const data = await res.json();
-        setStagedDeploy(data.sql, data.stats, data.pendingImageTransfers || []);
+        const transfers: PendingImageTransfer[] = data.pendingImageTransfers || [];
+        setStagedDeploy(data.sql, data.stats, transfers);
+        setPendingImages(transfers);
+        setSelectedImageKeys(new Set(transfers.map((img: PendingImageTransfer) => img.entity_id)));
         return data;
       })();
 
@@ -253,7 +266,9 @@ export default function DeployPage({
           sessionId: id,
           sql: freshSql.sql,
           stats: freshSql.stats,
-          pendingImages: freshSql.pendingImageTransfers || [],
+          pendingImages: (freshSql.pendingImageTransfers || []).filter(
+            (img: PendingImageTransfer) => selectedImageKeys.has(img.entity_id),
+          ),
           deployTarget,
         }),
       });
@@ -279,8 +294,11 @@ export default function DeployPage({
     branding,
     setStagedDeploy,
     setDeployStatus,
+    setPendingImages,
+    setSelectedImageKeys,
     activeConnectionId,
     savedConnections,
+    selectedImageKeys,
   ]);
 
   function handleConnectionSaved() {
@@ -440,6 +458,61 @@ export default function DeployPage({
         <div className="space-y-4">
           <DeployStatusCard />
 
+          {/* Image selection panel — shown when SQL is generated and images exist */}
+          {generatedSql && deployStatus === "idle" && pendingImages.length > 0 && (
+            <Card>
+              <CardHeader className="pb-2 cursor-pointer" onClick={() => setShowImagePanel((v) => !v)}>
+                <CardTitle className="text-sm flex items-center justify-between">
+                  <span className="flex items-center gap-2">
+                    <ImageIcon className="h-4 w-4" />
+                    Images to push ({selectedImageKeys.size} / {pendingImages.length} selected)
+                  </span>
+                  {showImagePanel ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+                </CardTitle>
+              </CardHeader>
+              {showImagePanel && (
+                <CardContent className="pt-0 space-y-1">
+                  <div className="flex gap-2 mb-2">
+                    <button
+                      className="text-xs text-blue-600 hover:underline"
+                      onClick={() => setSelectedImageKeys(new Set(pendingImages.map((img) => img.entity_id)))}
+                    >
+                      Select all
+                    </button>
+                    <span className="text-xs text-muted-foreground">·</span>
+                    <button
+                      className="text-xs text-blue-600 hover:underline"
+                      onClick={() => setSelectedImageKeys(new Set())}
+                    >
+                      Deselect all
+                    </button>
+                  </div>
+                  <div className="max-h-48 overflow-y-auto space-y-1">
+                    {pendingImages.map((img) => (
+                      <label key={img.entity_id} className="flex items-center gap-2 text-xs cursor-pointer hover:bg-muted/50 rounded px-1 py-0.5">
+                        <input
+                          type="checkbox"
+                          checked={selectedImageKeys.has(img.entity_id)}
+                          onChange={(e) => {
+                            setSelectedImageKeys((prev) => {
+                              const next = new Set(prev);
+                              if (e.target.checked) next.add(img.entity_id);
+                              else next.delete(img.entity_id);
+                              return next;
+                            });
+                          }}
+                          className="rounded"
+                        />
+                        <span className="font-medium">{img.name}</span>
+                        <span className="text-muted-foreground ml-auto">{img.type}</span>
+                      </label>
+                    ))}
+                  </div>
+                </CardContent>
+              )}
+            </Card>
+          )}
+
           {generatedSql && deployStatus === "idle" && (
             <Button
               className="w-full gap-2"
@@ -447,7 +520,7 @@ export default function DeployPage({
               onClick={handleStageDeploy}
             >
               <Rocket className="h-4 w-4" />
-              Stage Deploy
+              Stage Deploy{selectedImageKeys.size > 0 ? ` (+${selectedImageKeys.size} images)` : " (no images)"}
             </Button>
           )}
           {deployStatus !== "idle" && deployStatus !== "executing" && (
