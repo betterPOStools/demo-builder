@@ -24,8 +24,14 @@ export async function GET(request: Request) {
     );
   }
 
+  // deploy_result is stored as a JSON string by the agent — parse it
+  let result = data.deploy_result;
+  if (typeof result === "string") {
+    try { result = JSON.parse(result); } catch { /* leave as-is */ }
+  }
+
   return Response.json({
     status: data.deploy_status,
-    result: data.deploy_result,
+    result,
   });
 }
