@@ -166,11 +166,20 @@ def execute_sql(sql, deploy_target=None):
         cursor.execute("SET FOREIGN_KEY_CHECKS=1")
         conn.commit()
     except Exception:
-        conn.rollback()
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         raise
     finally:
-        cursor.close()
-        conn.close()
+        try:
+            cursor.close()
+        except Exception:
+            pass
+        try:
+            conn.close()
+        except Exception:
+            pass
 
     return total_rows
 
