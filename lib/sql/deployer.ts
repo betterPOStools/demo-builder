@@ -282,8 +282,8 @@ export function generateFullDeployment(opts: {
         `\`CreatedOn\`, \`ModifiedOn\`, \`IsDeleted\`) VALUES (\n` +
         `  '${iid}', '${esc(item.name)}', ${rowIdx}, ${colIdx}, ${itemIndex}, ` +
         `'${gid}', ${cidSql}, 0, 1, ` +
-        `${price(item.default_price)}, ${price(item.dine_in_price)}, ${price(item.bar_price)}, ` +
-        `${price(item.pick_up_price)}, ${price(item.take_out_price)}, ${price(item.delivery_price)}, ` +
+        `${price(item.default_price)}, ${price(item.dine_in_price ?? item.default_price)}, ${price(item.bar_price ?? item.default_price)}, ` +
+        `${price(item.pick_up_price ?? item.default_price)}, ${price(item.take_out_price ?? item.default_price)}, ${price(item.delivery_price ?? item.default_price)}, ` +
         `${item.is_open_price}, ${item.tax1}, ${item.tax2}, ${item.tax3}, ` +
         `${item.is_bar_item}, ${item.is_weighted}, ${price(item.tare)}, ${barcodeSql}, ` +
         `1, 0, ` +

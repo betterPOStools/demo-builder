@@ -20,8 +20,8 @@ export function nowStr(): string {
   );
 }
 
-export function price(val: number): string {
-  return val.toFixed(30);
+export function price(val: number | null | undefined): string {
+  return (val ?? 0).toFixed(30);
 }
 
 export function esc(value: string | null | undefined): string {

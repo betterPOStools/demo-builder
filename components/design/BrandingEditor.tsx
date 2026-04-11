@@ -47,6 +47,27 @@ const SIDEBAR_H_PCT = (SIDEBAR_H / BG_H) * 100;
 
 const TRANSPARENT = "rgba(0,0,0,0)";
 
+/** Parse any CSS color string into { hex, alpha }. Returns hex in #rrggbb form. */
+function parseColor(value: string | null): { hex: string; alpha: number } {
+  if (!value || value === TRANSPARENT) return { hex: "#000000", alpha: 0 };
+  const rgba = value.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*([\d.]+))?\s*\)/);
+  if (rgba) {
+    const r = parseInt(rgba[1]).toString(16).padStart(2, "0");
+    const g = parseInt(rgba[2]).toString(16).padStart(2, "0");
+    const b = parseInt(rgba[3]).toString(16).padStart(2, "0");
+    return { hex: `#${r}${g}${b}`, alpha: rgba[4] !== undefined ? parseFloat(rgba[4]) : 1 };
+  }
+  return { hex: value, alpha: 1 };
+}
+
+/** Build an rgba() string from a #rrggbb hex and 0-1 alpha. */
+function toRgba(hex: string, alpha: number): string {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return alpha >= 1 ? hex : `rgba(${r},${g},${b},${alpha})`;
+}
+
 function ColorField({
   label,
   value,
@@ -59,14 +80,27 @@ function ColorField({
   allowTransparent?: boolean;
 }) {
   const isTransparent = value === TRANSPARENT;
+  const { hex, alpha } = parseColor(value);
+  const opacityPct = Math.round(alpha * 100);
+
+  function handleHexChange(newHex: string) {
+    onChange(toRgba(newHex, alpha));
+  }
+
+  function handleOpacityChange(pct: number) {
+    const newAlpha = pct / 100;
+    if (newAlpha === 0) { onChange(TRANSPARENT); return; }
+    onChange(toRgba(hex, newAlpha));
+  }
+
   return (
     <div className="space-y-1">
       <Label className="text-xs">{label}</Label>
       <div className="flex items-center gap-2">
         <input
           type="color"
-          value={isTransparent ? "#000000" : (value || "#000000")}
-          onChange={(e) => onChange(e.target.value)}
+          value={isTransparent ? "#000000" : hex}
+          onChange={(e) => handleHexChange(e.target.value)}
           className="h-8 w-8 cursor-pointer rounded border border-slate-700"
         />
         <Input
@@ -75,18 +109,6 @@ function ColorField({
           placeholder="#000000"
           className="h-8 w-28 font-mono text-xs"
         />
-        {allowTransparent && (
-          <button
-            onClick={() => onChange(isTransparent ? null : TRANSPARENT)}
-            className={`rounded px-1.5 py-0.5 text-[10px] font-medium transition ${
-              isTransparent
-                ? "bg-slate-500 text-white"
-                : "border border-slate-600 text-slate-400 hover:border-slate-400 hover:text-slate-200"
-            }`}
-          >
-            ⬜ Clear
-          </button>
-        )}
         {value && !isTransparent && (
           <button
             onClick={() => onChange(null)}
@@ -96,6 +118,28 @@ function ColorField({
           </button>
         )}
       </div>
+      {allowTransparent && !isTransparent && value && (
+        <div className="flex items-center gap-2 pt-0.5">
+          <span className="w-14 text-[10px] text-slate-500">Opacity</span>
+          <input
+            type="range"
+            min={0}
+            max={100}
+            value={opacityPct}
+            onChange={(e) => handleOpacityChange(Number(e.target.value))}
+            className="h-1.5 flex-1 cursor-pointer accent-blue-500"
+          />
+          <span className="w-8 text-right text-[10px] text-slate-400">{opacityPct}%</span>
+        </div>
+      )}
+      {allowTransparent && isTransparent && (
+        <button
+          onClick={() => onChange(toRgba(hex, 1))}
+          className="text-[10px] text-slate-500 hover:text-slate-300"
+        >
+          Restore color
+        </button>
+      )}
     </div>
   );
 }
