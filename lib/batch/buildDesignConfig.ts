@@ -16,6 +16,7 @@
 import { parseMenuRows } from "@/lib/menuImport";
 import { serializeDesignConfig } from "@/lib/serializer";
 import { PREMADE_TEMPLATES } from "@/lib/presets/premadeTemplates";
+import { RESTAURANT_TYPE_PALETTES } from "@/lib/presets/typePalettes";
 import { LAYOUT_PRESETS } from "@/lib/sql/layout";
 import { generateId } from "@/lib/utils";
 import type { MenuItemsPayload, CategoryName } from "@/lib/types";
@@ -214,6 +215,12 @@ export interface BuildDesignConfigOptions {
   layoutKey?: string;
   /** Override modifier template keys (defaults to type mapping) */
   templateKeys?: string[];
+  /**
+   * When true, inject the static RESTAURANT_TYPE_PALETTES color into branding.
+   * Used by the batch pipeline so demos have a designed color identity without
+   * an AI call. Defaults to false to preserve existing behaviour.
+   */
+  applyTypePalette?: boolean;
 }
 
 export function buildDesignConfig(opts: BuildDesignConfigOptions): DesignConfigV2 {
@@ -234,5 +241,16 @@ export function buildDesignConfig(opts: BuildDesignConfigOptions): DesignConfigV
     rooms,
   };
 
-  return serializeDesignConfig(state, modifierTemplates);
+  const config = serializeDesignConfig(state, modifierTemplates);
+
+  if (opts.applyTypePalette) {
+    const palette = RESTAURANT_TYPE_PALETTES[opts.restaurantType];
+    config.branding = {
+      ...config.branding,
+      buttons_background_color: palette.buttons_background_color,
+      buttons_font_color: palette.buttons_font_color,
+    };
+  }
+
+  return config;
 }

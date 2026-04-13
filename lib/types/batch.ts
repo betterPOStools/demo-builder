@@ -1,4 +1,4 @@
-// Batch pipeline types — prospects input + snapshot index output
+// Batch pipeline types — prospects input, queue entries, and snapshot index output
 
 export type RestaurantType =
   | "fast_casual"
@@ -58,4 +58,24 @@ export interface SnapshotEntry {
 export interface SnapshotIndex {
   version: "1";
   snapshots: SnapshotEntry[];
+}
+
+// ─── Batch queue (Supabase demo_builder.batch_queue) ─────────────────────────
+
+/** BUSINESS RULE: status flows queued → processing → done | failed */
+export type BatchQueueStatus = "queued" | "processing" | "done" | "failed";
+
+export interface BatchQueueEntry {
+  id: string;
+  pt_record_id: string;
+  name: string;
+  menu_url: string;
+  restaurant_type: RestaurantType;
+  status: BatchQueueStatus;
+  /** Set once processing completes successfully */
+  session_id: string | null;
+  /** Populated when status === "failed" */
+  error: string | null;
+  created_at: string;
+  updated_at: string;
 }

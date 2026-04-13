@@ -65,7 +65,9 @@ SSH_HOST      = os.environ.get("SSH_HOST", "")   # defaults to DB_HOST if empty
 SSH_USER      = os.environ.get("SSH_USER", "admin")
 POS_IMAGES_DIR = os.environ.get("POS_IMAGES_DIR", r"C:\Program Files\Pecan Solutions\Pecan POS\images")
 PSEXEC_PATH   = os.environ.get("PSEXEC_PATH", r"C:\tools\PsExec64.exe")
-POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "5"))
+POLL_INTERVAL        = int(os.environ.get("POLL_INTERVAL", "5"))
+DEMO_BUILDER_API_URL = os.environ.get("DEMO_BUILDER_API_URL", "http://localhost:3002")
+SNAPSHOT_DIR         = os.path.expanduser(os.environ.get("SNAPSHOT_DIR", "~/Projects/demo-DBs"))
 
 HEADERS = {
     "apikey": SUPABASE_KEY,
@@ -119,6 +121,159 @@ def supabase_patch(table, match, data):
     url = f"{SUPABASE_URL}/rest/v1/{table}"
     r = requests.patch(url, headers=HEADERS, params=match, json=data, timeout=10)
     r.raise_for_status()
+
+# ---------------------------------------------------------------------------
+# Snapshot helpers (batch generation)
+# ---------------------------------------------------------------------------
+
+def get_snapshot_path(name, pt_record_id, allow_versioning=False):
+    """Return the local .sql path for a snapshot.
+
+    allow_versioning=False (batch): always return base path; caller must not
+    overwrite — the batch queue route already skips existing done sessions.
+    allow_versioning=True (manual re-gen): increment _vN suffix so old files
+    are preserved.
+    """
+    import re as _re
+    slug = _re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")[:40]
+    short_id = pt_record_id.replace("-", "")[:8]
+    base = f"{slug}_{short_id}"
+    base_path = os.path.join(SNAPSHOT_DIR, f"{base}.sql")
+
+    if not allow_versioning or not os.path.exists(base_path):
+        return base_path
+
+    v = 2
+    while os.path.exists(os.path.join(SNAPSHOT_DIR, f"{base}_v{v}.sql")):
+        v += 1
+    return os.path.join(SNAPSHOT_DIR, f"{base}_v{v}.sql")
+
+
+def save_snapshot(pt_record_id, name, session_id, sql, allow_versioning=False):
+    """Write a generated SQL file to SNAPSHOT_DIR and update snapshot_index.json."""
+    os.makedirs(SNAPSHOT_DIR, exist_ok=True)
+    path = get_snapshot_path(name, pt_record_id, allow_versioning)
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(sql)
+    print(f"  [SNAP] Saved: {path}")
+
+    index_path = os.path.join(SNAPSHOT_DIR, "snapshot_index.json")
+    try:
+        if os.path.exists(index_path):
+            with open(index_path) as f:
+                index = json.load(f)
+        else:
+            index = {"version": "1", "snapshots": []}
+
+        index["snapshots"].append({
+            "prospect_id": pt_record_id,
+            "name": name,
+            "file": path,
+            "session_id": session_id,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "status": "ready",
+        })
+
+        with open(index_path, "w") as f:
+            json.dump(index, f, indent=2)
+    except Exception as e:
+        print(f"  [SNAP] Could not update index: {e}")
+
+    return path
+
+# ---------------------------------------------------------------------------
+# Batch generation queue
+# ---------------------------------------------------------------------------
+
+def process_generate_queue():
+    """Poll batch_queue for queued jobs and call Demo Builder /api/batch/process."""
+    if not DEMO_BUILDER_API_URL:
+        return
+
+    try:
+        rows = supabase_get("batch_queue", {
+            "status": "eq.queued",
+            "select": "id,pt_record_id,name",
+            "limit": "3",  # process up to 3 per poll cycle
+        })
+    except Exception as e:
+        print(f"[GEN] Supabase error: {e}")
+        return
+
+    for job in rows:
+        jid  = job["id"]
+        name = job["name"]
+        print(f"\n[GEN] Job {jid[:8]}  {name}")
+
+        # Claim the job before calling the API so parallel agents don't double-process
+        try:
+            supabase_patch("batch_queue", {"id": f"eq.{jid}"}, {
+                "status": "processing",
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            })
+        except Exception as e:
+            print(f"  [ERROR] Could not claim job: {e}")
+            continue
+
+        try:
+            resp = requests.post(
+                f"{DEMO_BUILDER_API_URL}/api/batch/process",
+                json={"queue_id": jid},
+                timeout=310,  # allow full Vercel 300s timeout + buffer
+            )
+            result = resp.json()
+
+            if result.get("ok"):
+                session_id = result["session_id"]
+                # Fetch SQL from the created session and save locally
+                try:
+                    sessions = supabase_get("sessions", {
+                        "id": f"eq.{session_id}",
+                        "select": "generated_sql",
+                    })
+                    if sessions and sessions[0].get("generated_sql"):
+                        save_snapshot(
+                            job["pt_record_id"],
+                            name,
+                            session_id,
+                            sessions[0]["generated_sql"],
+                            allow_versioning=False,
+                        )
+                except Exception as e:
+                    print(f"  [SNAP] Could not save local snapshot: {e}")
+
+                stats = result.get("stats", {})
+                print(f"  [GEN] Done — session {session_id[:8]}, {stats}")
+
+            else:
+                error_msg = result.get("error", "Unknown error")
+                supabase_patch("batch_queue", {"id": f"eq.{jid}"}, {
+                    "status": "failed",
+                    "error": error_msg[:500],
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                })
+                print(f"  [GEN] Failed: {error_msg}")
+
+        except requests.Timeout:
+            err = "API call timed out after 310s"
+            supabase_patch("batch_queue", {"id": f"eq.{jid}"}, {
+                "status": "failed",
+                "error": err,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            })
+            print(f"  [GEN] Timeout for job {jid[:8]}")
+
+        except Exception as e:
+            try:
+                supabase_patch("batch_queue", {"id": f"eq.{jid}"}, {
+                    "status": "failed",
+                    "error": str(e)[:500],
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                })
+            except Exception:
+                pass
+            print(f"  [GEN] Error: {e}")
 
 # ---------------------------------------------------------------------------
 # SQL Execution
@@ -514,7 +669,8 @@ def main():
 
     while True:
         try:
-            process_queued()
+            process_generate_queue()  # batch generation jobs (PT → Demo Builder)
+            process_queued()           # deploy jobs (Demo Builder → tablet)
             consecutive_errors = 0
 
             # Heartbeat: update agent_last_seen on the connection record for this host
