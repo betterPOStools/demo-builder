@@ -183,6 +183,45 @@ def save_snapshot(pt_record_id, name, session_id, sql, allow_versioning=False):
     return path
 
 # ---------------------------------------------------------------------------
+# Playwright JS-page fallback
+# ---------------------------------------------------------------------------
+
+# Error phrases from extract-url that indicate a JS-rendered page (not a hard failure)
+_JS_CONTENT_ERRORS = (
+    "too little content",
+    "no menu items",
+    "inaccessible or empty",
+    "blocking automated requests",
+)
+
+def fetch_page_text_playwright(url: str, timeout_ms: int = 30_000) -> str | None:
+    """Open url in headless Chromium, wait for JS to render, return body text.
+
+    Returns None if playwright is not installed or the fetch fails — callers
+    should treat None as 'fallback unavailable' and leave the job failed.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("  [PW] playwright not installed — skipping JS fallback")
+        print("       To enable: pip3 install playwright && python3 -m playwright install chromium")
+        return None
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto(url, wait_until="networkidle", timeout=timeout_ms)
+            text = page.inner_text("body")
+            browser.close()
+            trimmed = text.strip()[:40_000]
+            print(f"  [PW] Got {len(trimmed)} chars from {url}")
+            return trimmed or None
+    except Exception as e:
+        print(f"  [PW] Playwright fetch failed: {e}")
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Batch generation queue
 # ---------------------------------------------------------------------------
 
@@ -194,7 +233,7 @@ def process_generate_queue():
     try:
         rows = supabase_get("batch_queue", {
             "status": "eq.queued",
-            "select": "id,pt_record_id,name",
+            "select": "id,pt_record_id,name,menu_url",
             "limit": "3",  # process up to 3 per poll cycle
         })
     except Exception as e:
@@ -248,12 +287,57 @@ def process_generate_queue():
 
             else:
                 error_msg = result.get("error", "Unknown error")
+                print(f"  [GEN] Failed: {error_msg}")
+
+                # If the error looks like a JS-rendered page, retry via Playwright
+                is_js_failure = any(h in error_msg.lower() for h in _JS_CONTENT_ERRORS)
+                if is_js_failure and job.get("menu_url"):
+                    print(f"  [PW] JS-rendered page suspected — trying Playwright fallback")
+                    raw_text = fetch_page_text_playwright(job["menu_url"])
+                    if raw_text and len(raw_text) > 100:
+                        # Re-claim the job (route requires status='processing')
+                        supabase_patch("batch_queue", {"id": f"eq.{jid}"}, {
+                            "status": "processing",
+                            "updated_at": datetime.now(timezone.utc).isoformat(),
+                        })
+                        resp2 = requests.post(
+                            f"{DEMO_BUILDER_API_URL}/api/batch/process",
+                            json={"queue_id": jid, "raw_text": raw_text},
+                            timeout=310,
+                        )
+                        result = resp2.json()
+                        if result.get("ok"):
+                            # Success — handle same as normal success path
+                            session_id = result["session_id"]
+                            try:
+                                sessions = supabase_get("sessions", {
+                                    "id": f"eq.{session_id}",
+                                    "select": "generated_sql",
+                                })
+                                if sessions and sessions[0].get("generated_sql"):
+                                    save_snapshot(
+                                        job["pt_record_id"],
+                                        name,
+                                        session_id,
+                                        sessions[0]["generated_sql"],
+                                        allow_versioning=False,
+                                    )
+                            except Exception as e:
+                                print(f"  [SNAP] Could not save local snapshot: {e}")
+                            stats = result.get("stats", {})
+                            print(f"  [PW] Done — session {session_id[:8]}, {stats}")
+                            continue  # skip the mark-failed below
+                        else:
+                            error_msg = result.get("error", "Playwright retry failed")
+                            print(f"  [PW] Retry failed: {error_msg}")
+                    else:
+                        print("  [PW] Playwright returned no usable text")
+
                 supabase_patch("batch_queue", {"id": f"eq.{jid}"}, {
                     "status": "failed",
                     "error": error_msg[:500],
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 })
-                print(f"  [GEN] Failed: {error_msg}")
 
         except requests.Timeout:
             err = "API call timed out after 310s"

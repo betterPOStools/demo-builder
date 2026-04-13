@@ -72,16 +72,17 @@ export async function POST(request: Request) {
 
   try {
     const body = (await request.json()) as {
-      url: string;
+      url?: string;
+      rawText?: string;
       extendedMode?: boolean;
       sessionId?: string;
     };
 
-    if (!body.url) {
-      return Response.json({ error: "No URL provided" }, { status: 400 });
+    if (!body.url && !body.rawText) {
+      return Response.json({ error: "No URL or rawText provided" }, { status: 400 });
     }
 
-    const url = body.url;
+    const url = body.url ?? "";
     const extendedMode = !!body.extendedMode;
     const systemPrompt = extendedMode
       ? EXTENDED_MENU_SYSTEM_PROMPT
@@ -89,6 +90,45 @@ export async function POST(request: Request) {
     const userSuffix = extendedMode
       ? "Return JSON object only."
       : "Return JSON array only.";
+
+    // ── rawText fast-path: skip URL fetch entirely ────────────────────────────
+    // Used by the local deploy agent when Playwright pre-fetched a JS-rendered page.
+    if (body.rawText) {
+      const extractionContent = body.rawText.slice(0, 40_000);
+      const userMessage = `Extract all menu items from this restaurant website.\nURL: ${url || "unknown"}\n\n---\n${extractionContent}\n---\n\n${userSuffix}`;
+
+      console.log(`[extract-url] rawText path — ${extractionContent.length} chars, url=${url || "none"}`);
+
+      const stream = client.messages.stream({
+        model: "claude-haiku-4-5",
+        max_tokens: extendedMode ? 24000 : 16000,
+        system: systemPrompt,
+        messages: [{ role: "user", content: userMessage }],
+      });
+
+      const response = await stream.finalMessage();
+      const textBlock = response.content.find((b) => b.type === "text");
+      if (!textBlock || textBlock.type !== "text") {
+        return Response.json({ error: "No AI response" }, { status: 500 });
+      }
+
+      const result = parseAiResponse(textBlock.text.trim(), extendedMode);
+      const json: Record<string, unknown> = {
+        rows: result.rows,
+        count: result.rows.length,
+        graphics: [],
+        pageTitle: null,
+        sourceUrl: url || "raw-text",
+        suggestedName: url ? new URL(url).hostname.replace(/^www\./, "") : null,
+      };
+      if (extendedMode) {
+        json.extendedRows = result.extendedRows;
+        json.restaurantType = result.restaurantType;
+        json.modifierTemplates = result.modifierTemplates;
+      }
+      console.log(`[extract-url] rawText extracted ${result.rows.length} rows in ${Date.now() - t0}ms`);
+      return Response.json(json);
+    }
 
     // Fetch the URL — retry with Google webcache on 403
     let pageRes = await fetch(url, {

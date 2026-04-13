@@ -32,7 +32,7 @@ function getBaseUrl(request: Request): string {
 // ─── POST /api/batch/process ─────────────────────────────────────────────────
 
 export async function POST(request: Request): Promise<Response> {
-  const body = (await request.json()) as { queue_id?: string };
+  const body = (await request.json()) as { queue_id?: string; raw_text?: string };
 
   if (!body.queue_id) {
     return Response.json({ error: "Missing queue_id" }, { status: 400 });
@@ -77,7 +77,7 @@ export async function POST(request: Request): Promise<Response> {
     const extractRes = await fetch(`${baseUrl}/api/extract-url`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url: job.menu_url, extendedMode: true }),
+      body: JSON.stringify({ url: job.menu_url, rawText: body.raw_text, extendedMode: true }),
     });
 
     if (!extractRes.ok) {
@@ -102,6 +102,11 @@ export async function POST(request: Request): Promise<Response> {
 
     const designConfig = buildDesignConfig({
       payload: {
+        version: "1.0",
+        source: "batch",
+        extraction_id: body.queue_id!,
+        extracted_at: new Date().toISOString(),
+        item_count: (rows as unknown[]).length,
         restaurant_name: job.name,
         items: rows as Parameters<typeof buildDesignConfig>[0]["payload"]["items"],
       },
