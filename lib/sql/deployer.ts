@@ -1,7 +1,7 @@
 // Ported from pos-scaffold/app/core/deployer.py
 // Full menu deployment SQL generator.
 
-import { newUuid, nowStr, esc, price, generateTemplateSql } from "./generator";
+import { newUuid, nowStr, esc, price, priceOrNull, generateTemplateSql } from "./generator";
 import { generateRoomSql, generateTableSql } from "./layout";
 import type { RoomDef, TableDef } from "./layout";
 import type { ParsedItem, ParsedModifierTemplate, GroupMeta } from "./designParser";
@@ -282,8 +282,8 @@ export function generateFullDeployment(opts: {
         `\`CreatedOn\`, \`ModifiedOn\`, \`IsDeleted\`) VALUES (\n` +
         `  '${iid}', '${esc(item.name)}', ${rowIdx}, ${colIdx}, ${itemIndex}, ` +
         `'${gid}', ${cidSql}, 0, 1, ` +
-        `${price(item.default_price)}, ${price(item.dine_in_price ?? item.default_price)}, ${price(item.bar_price ?? item.default_price)}, ` +
-        `${price(item.pick_up_price ?? item.default_price)}, ${price(item.take_out_price ?? item.default_price)}, ${price(item.delivery_price ?? item.default_price)}, ` +
+        `${price(item.default_price)}, ${priceOrNull(item.dine_in_price)}, ${priceOrNull(item.bar_price)}, ` +
+        `${priceOrNull(item.pick_up_price)}, ${priceOrNull(item.take_out_price)}, ${priceOrNull(item.delivery_price)}, ` +
         `${item.is_open_price}, ${item.tax1}, ${item.tax2}, ${item.tax3}, ` +
         `${item.is_bar_item}, ${item.is_weighted}, ${price(item.tare)}, ${barcodeSql}, ` +
         `1, 0, ` +

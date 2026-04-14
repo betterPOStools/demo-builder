@@ -24,6 +24,12 @@ export function price(val: number | null | undefined): string {
   return (val ?? 0).toFixed(30);
 }
 
+/** Returns SQL NULL for zero/null/undefined — used for per-mode prices
+ *  (DineInPrice, BarPrice, etc.) so the POS falls back to DefaultPrice. */
+export function priceOrNull(val: number | null | undefined): string {
+  return val ? val.toFixed(30) : "NULL";
+}
+
 export function esc(value: string | null | undefined): string {
   if (value == null) return "";
   return String(value).replace(/'/g, "''").replace(/\\/g, "\\\\");
