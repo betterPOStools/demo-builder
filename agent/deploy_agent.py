@@ -40,6 +40,11 @@ from urllib.parse import urljoin, urlparse
 import mysql.connector
 import requests
 
+try:
+    import anthropic
+except ImportError:
+    anthropic = None
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -73,6 +78,18 @@ DEMO_BUILDER_API_URL = os.environ.get("DEMO_BUILDER_API_URL", "http://localhost:
 SNAPSHOT_DIR         = os.path.expanduser(os.environ.get("SNAPSHOT_DIR", "~/Projects/demo-DBs"))
 ANTHROPIC_API_KEY    = os.environ.get("ANTHROPIC_API_KEY", "")
 
+# ── Staged batch pipeline (4 stages + assemble) ─────────────────────────────
+# Each stage's AI batch is a POOL of rows that fell through the mechanical path.
+# Waves submit when >= WAVE_MIN_SIZE rows are queued or the oldest row has been
+# waiting > FORCE_WAVE_AFTER_SECONDS. Batch discount is 50%, prompt-caching
+# makes per-wave system-prompt reuse essentially free after the first request.
+WAVE_MIN_SIZE            = int(os.environ.get("WAVE_MIN_SIZE", "20"))
+WAVE_MAX_SIZE            = int(os.environ.get("WAVE_MAX_SIZE", "40"))
+BATCH_BUDGET_USD         = float(os.environ.get("BATCH_BUDGET_USD", "5.0"))
+FORCE_WAVE_AFTER_SECONDS = int(os.environ.get("FORCE_WAVE_AFTER_SECONDS", "1800"))
+BATCH_POLL_INTERVAL_SEC  = int(os.environ.get("BATCH_POLL_INTERVAL_SEC", "60"))
+BATCH_MODEL              = os.environ.get("BATCH_MODEL", "claude-haiku-4-5-20251001")
+
 HEADERS = {
     "apikey": SUPABASE_KEY,
     "Authorization": f"Bearer {SUPABASE_KEY}",
@@ -81,6 +98,43 @@ HEADERS = {
     "Accept-Profile": "demo_builder",
     "Content-Profile": "demo_builder",
 }
+
+# Module-scope Anthropic client — created once, reused across all stage batches.
+_anthropic = (
+    anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    if anthropic and ANTHROPIC_API_KEY else None
+)
+
+# Load stage system prompts from lib/extraction/prompts.ts at startup.
+# Single source of truth; the TS side is authoritative.
+_PROMPTS_TS_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "lib", "extraction", "prompts.ts",
+)
+
+def _load_stage_prompts():
+    try:
+        with open(_PROMPTS_TS_PATH, "r", encoding="utf-8") as f:
+            src = f.read()
+    except Exception as e:
+        print(f"[PROMPTS] Could not load prompts.ts: {e}")
+        return {}
+    names = (
+        "DISCOVERY_SYSTEM_PROMPT",
+        "MENU_EXTRACTION_SYSTEM_PROMPT",
+        "MODIFIER_INFERENCE_SYSTEM_PROMPT",
+        "BRANDING_TOKENS_SYSTEM_PROMPT",
+    )
+    out = {}
+    for name in names:
+        m = re.search(
+            rf"export const {name} = `(.*?)`;",
+            src, re.DOTALL,
+        )
+        if m:
+            out[name] = m.group(1)
+    return out
+
+_STAGE_PROMPTS = _load_stage_prompts()
 
 # ---------------------------------------------------------------------------
 # SSH helpers
@@ -585,11 +639,817 @@ def extract_ldjson_full_menu(menu_url: str):
 # Batch generation queue
 # ---------------------------------------------------------------------------
 
+# Raised when the Anthropic API usage limit is hit — signals the batch loop
+# to requeue the current job and stop processing further jobs this cycle.
+class _ApiLimitHit(Exception):
+    pass
+
+_API_LIMIT_PHRASE = "you have reached your specified api usage limits"
+
+
+# ---------------------------------------------------------------------------
+# Staged batch pipeline (4-stage AI + assemble)
+# ---------------------------------------------------------------------------
+
+def _now_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_ai_json(text):
+    """Parse a JSON object out of a model response, tolerating ```json fences."""
+    if not text:
+        return None
+    t = text.strip()
+    if t.startswith("```"):
+        t = re.sub(r"^```(?:json)?\s*", "", t)
+        t = re.sub(r"\s*```$", "", t)
+    try:
+        return json.loads(t)
+    except Exception:
+        m = re.search(r"\{[\s\S]*\}", t)
+        if m:
+            try:
+                return json.loads(m.group(0))
+            except Exception:
+                return None
+        return None
+
+
+def _fetch_homepage_html(url, max_chars=40_000):
+    """Fetch the homepage HTML via curl_cffi (Chrome TLS fingerprint).
+    Returns raw HTML trimmed to max_chars, or None if unreachable/blocked."""
+    try:
+        from curl_cffi import requests as cffi_requests
+    except ImportError:
+        return None
+    try:
+        r = cffi_requests.get(url, impersonate="chrome", timeout=20)
+        html = r.text or ""
+        if any(p in html.lower() for p in _CF_PHRASES):
+            return None
+        return html[:max_chars]
+    except Exception:
+        return None
+
+
+def _ldjson_items_to_rows(merged_text):
+    """Convert merged ld+json menu text to the 9-column extraction-result items.
+    Returns (items_list, restaurant_type_hint). Items have the same shape that
+    MENU_EXTRACTION_SYSTEM_PROMPT emits so downstream code is uniform.
+    Lines look like '## Group — Section' and 'Name — $price' or 'Name — desc'.
+    """
+    items = []
+    current_group = "Menu"
+    for raw in merged_text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("##"):
+            header = line.lstrip("# ").strip()
+            current_group = header.split(" — ")[-1] or header
+            continue
+        m = re.match(r"^(.+?)\s+—\s+\$?([\d.]+)(?:\s|$)", line)
+        if m:
+            name = m.group(1).strip()
+            price = float(m.group(2))
+            items.append({
+                "Menu Item Full Name": name,
+                "Menu Item Group": current_group,
+                "Menu Item Category": "Food",
+                "Default Price": price,
+            })
+        else:
+            m2 = re.match(r"^([A-Z][^—]{1,80})$", line)
+            if m2:
+                items.append({
+                    "Menu Item Full Name": m2.group(1).strip(),
+                    "Menu Item Group": current_group,
+                    "Menu Item Category": "Food",
+                    "Default Price": 0,
+                })
+    return items
+
+
+def _wave_is_ready(rows):
+    """Decide whether a stage wave has enough rows to submit, or whether the
+    oldest queued row has been waiting long enough to force a submit below size.
+    rows: list of pool rows (must contain at least 'updated_at')."""
+    if not rows:
+        return False
+    if len(rows) >= WAVE_MIN_SIZE:
+        return True
+    oldest = min(
+        (r.get("updated_at") or _now_iso()) for r in rows
+    )
+    try:
+        oldest_dt = datetime.fromisoformat(oldest.replace("Z", "+00:00"))
+        if oldest_dt.tzinfo is None:
+            oldest_dt = oldest_dt.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - oldest_dt).total_seconds()
+        return age >= FORCE_WAVE_AFTER_SECONDS
+    except Exception:
+        return False
+
+
+# ── Stage 1: URL discovery ──────────────────────────────────────────────────
+
+def advance_stage_discover():
+    """Per-job mechanical URL discovery. Jobs where mechanical discovery fails
+    go into pool_discover for the AI discovery batch."""
+    try:
+        rows = supabase_get("batch_queue", {
+            "status": "eq.queued",
+            "select": "id,pt_record_id,name,menu_url",
+            "limit": "5",
+        })
+    except Exception as e:
+        print(f"[S1] Supabase error: {e}")
+        return
+
+    for job in rows:
+        jid = job["id"]
+        name = job["name"]
+        homepage_url = job["menu_url"]
+        print(f"\n[S1] {jid[:8]}  {name}")
+
+        try:
+            supabase_patch("batch_queue", {"id": f"eq.{jid}"}, {
+                "status": "discovering",
+                "updated_at": _now_iso(),
+            })
+        except Exception as e:
+            print(f"  [S1] claim failed: {e}")
+            continue
+
+        # Fetch homepage once — used for both discovery + stage-4 branding stash
+        homepage_html = _fetch_homepage_html(homepage_url, max_chars=60_000)
+        homepage_trimmed = (homepage_html or "")[:20_000]  # stash for stage 4
+
+        discovery = discover_menu_url(homepage_url)
+
+        if discovery["type"] == "pdf":
+            supabase_patch("batch_queue", {"id": f"eq.{jid}"}, {
+                "status": "needs_pdf",
+                "homepage_html": homepage_trimmed or None,
+                "updated_at": _now_iso(),
+            })
+            print(f"  [S1] PDF → needs_pdf")
+            continue
+
+        if discovery["type"] in ("ldjson", "html", "platform"):
+            supabase_patch("batch_queue", {"id": f"eq.{jid}"}, {
+                "status": "ready_for_extract",
+                "menu_url": discovery["url"],
+                "homepage_html": homepage_trimmed or None,
+                "updated_at": _now_iso(),
+            })
+            print(f"  [S1] → ready_for_extract  {discovery['url']}")
+            continue
+
+        # Mechanical failed → pool for AI discovery batch
+        if not homepage_html:
+            supabase_patch("batch_queue", {"id": f"eq.{jid}"}, {
+                "status": "failed",
+                "error": "Homepage unreachable (CF or network)",
+                "updated_at": _now_iso(),
+            })
+            print(f"  [S1] homepage unreachable → failed")
+            continue
+
+        supabase_patch("batch_queue", {"id": f"eq.{jid}"}, {
+            "status": "pool_discover",
+            "homepage_html": homepage_trimmed,
+            "updated_at": _now_iso(),
+        })
+        print(f"  [S1] mechanical miss → pool_discover")
+
+
+# ── Stage 2: menu extraction ────────────────────────────────────────────────
+
+def advance_stage_extract():
+    """Per-job mechanical menu extraction via ld+json. Jobs without usable
+    ld+json fall through to raw-text stash + pool_extract."""
+    try:
+        rows = supabase_get("batch_queue", {
+            "status": "eq.ready_for_extract",
+            "select": "id,name,menu_url",
+            "limit": "5",
+        })
+    except Exception as e:
+        print(f"[S2] Supabase error: {e}")
+        return
+
+    for job in rows:
+        jid = job["id"]
+        name = job["name"]
+        menu_url = job["menu_url"]
+        print(f"\n[S2] {jid[:8]}  {name}")
+
+        try:
+            supabase_patch("batch_queue", {"id": f"eq.{jid}"}, {
+                "status": "extracting",
+                "updated_at": _now_iso(),
+            })
+        except Exception as e:
+            print(f"  [S2] claim failed: {e}")
+            continue
+
+        ldjson_text = extract_ldjson_full_menu(menu_url)
+        if ldjson_text:
+            items = _ldjson_items_to_rows(ldjson_text)
+            if items and len(items) >= 5:
+                supabase_patch("batch_queue", {"id": f"eq.{jid}"}, {
+                    "status": "ready_for_modifier",
+                    "extraction_result": {
+                        "restaurantType": None,
+                        "items": items,
+                    },
+                    "updated_at": _now_iso(),
+                })
+                print(f"  [S2] ld+json → ready_for_modifier ({len(items)} items)")
+                continue
+
+        # Mechanical miss — grab raw text and pool for AI batch
+        raw = (
+            extract_ldjson_full_menu(menu_url)
+            or fetch_page_text_curl_cffi(menu_url)
+            or fetch_page_text_playwright(menu_url)
+        )
+        if not raw or len(raw) < 200:
+            supabase_patch("batch_queue", {"id": f"eq.{jid}"}, {
+                "status": "failed",
+                "error": "Could not fetch menu page text",
+                "updated_at": _now_iso(),
+            })
+            print(f"  [S2] no text → failed")
+            continue
+
+        supabase_patch("batch_queue", {"id": f"eq.{jid}"}, {
+            "status": "pool_extract",
+            "raw_text": raw[:40_000],
+            "updated_at": _now_iso(),
+        })
+        print(f"  [S2] no ld+json → pool_extract ({len(raw)} chars stashed)")
+
+
+# ── Stage 3: modifier inference ─────────────────────────────────────────────
+
+def advance_stage_modifier():
+    """If extraction_result already has modifierTemplates, short-circuit to
+    ready_for_branding. Otherwise pool for AI inference."""
+    try:
+        rows = supabase_get("batch_queue", {
+            "status": "eq.ready_for_modifier",
+            "select": "id,name,extraction_result",
+            "limit": "10",
+        })
+    except Exception as e:
+        print(f"[S3] Supabase error: {e}")
+        return
+
+    for job in rows:
+        jid = job["id"]
+        extraction = job.get("extraction_result") or {}
+        existing_templates = extraction.get("modifierTemplates")
+        item_map = extraction.get("itemTemplateMap")
+
+        if existing_templates:
+            modifier_result = {
+                "modifierTemplates": existing_templates,
+                "itemTemplateMap": item_map or {},
+            }
+            supabase_patch("batch_queue", {"id": f"eq.{jid}"}, {
+                "status": "ready_for_branding",
+                "modifier_result": modifier_result,
+                "updated_at": _now_iso(),
+            })
+            print(f"[S3] {jid[:8]} inherited modifiers → ready_for_branding")
+            continue
+
+        supabase_patch("batch_queue", {"id": f"eq.{jid}"}, {
+            "status": "pool_modifier",
+            "updated_at": _now_iso(),
+        })
+        print(f"[S3] {jid[:8]} no modifiers → pool_modifier")
+
+
+# ── Stage 4: branding tokens (mechanical-first) ─────────────────────────────
+
+_HEX_RE = re.compile(r"#[0-9A-Fa-f]{6}\b")
+_WP_DEFAULT_PALETTE = {
+    "#cf2e2e", "#ff6900", "#fcb900", "#7bdcb5", "#00d084",
+    "#8ed1fc", "#0693e3", "#abb8c3", "#9b51e0",
+}
+
+
+def _extract_branding_mechanical(html):
+    """Try to find an intentional brand color in the homepage HTML.
+    Returns dict or None."""
+    if not html:
+        return None
+    # 1. <meta name="theme-color" content="#...">
+    m = re.search(
+        r'<meta\s+name=["\']theme-color["\']\s+content=["\'](#[0-9A-Fa-f]{6})["\']',
+        html, re.IGNORECASE,
+    )
+    if m:
+        return {"buttons_background_color": m.group(1).upper()}
+    # 2. CSS custom properties — look for --primary / --brand / --accent
+    m = re.search(
+        r"--(?:primary|brand|brand-primary|accent|accent-color|color-primary"
+        r"|wp--preset--color--primary|wp--preset--color--accent)\s*:\s*(#[0-9A-Fa-f]{6})",
+        html, re.IGNORECASE,
+    )
+    if m:
+        hex_val = m.group(1).lower()
+        if hex_val not in _WP_DEFAULT_PALETTE:
+            return {"buttons_background_color": hex_val.upper()}
+    return None
+
+
+def advance_stage_branding():
+    """Try mechanical token extraction from homepage_html. Misses → pool."""
+    try:
+        rows = supabase_get("batch_queue", {
+            "status": "eq.ready_for_branding",
+            "select": "id,name,homepage_html,menu_url,restaurant_type",
+            "limit": "10",
+        })
+    except Exception as e:
+        print(f"[S4] Supabase error: {e}")
+        return
+
+    for job in rows:
+        jid = job["id"]
+        tokens = _extract_branding_mechanical(job.get("homepage_html") or "")
+        if tokens:
+            tokens["buttons_font_color"] = "#FFFFFF"
+            supabase_patch("batch_queue", {"id": f"eq.{jid}"}, {
+                "status": "ready_to_assemble",
+                "branding_result": tokens,
+                "updated_at": _now_iso(),
+            })
+            print(f"[S4] {jid[:8]} mechanical hit → ready_to_assemble  {tokens}")
+            continue
+
+        supabase_patch("batch_queue", {"id": f"eq.{jid}"}, {
+            "status": "pool_branding",
+            "updated_at": _now_iso(),
+        })
+        print(f"[S4] {jid[:8]} mechanical miss → pool_branding")
+
+
+# ── Stage 5: assemble (POST to /api/batch/ingest) ───────────────────────────
+
+def advance_stage_assemble():
+    """For each ready_to_assemble row, POST to /api/batch/ingest.
+    The ingest route owns session insert + batch_queue → done."""
+    if not DEMO_BUILDER_API_URL:
+        return
+    try:
+        rows = supabase_get("batch_queue", {
+            "status": "eq.ready_to_assemble",
+            "select": "id,name",
+            "limit": "5",
+        })
+    except Exception as e:
+        print(f"[S5] Supabase error: {e}")
+        return
+
+    for job in rows:
+        jid = job["id"]
+        name = job["name"]
+        print(f"\n[S5] {jid[:8]}  {name}")
+        try:
+            supabase_patch("batch_queue", {"id": f"eq.{jid}"}, {
+                "status": "assembling",
+                "updated_at": _now_iso(),
+            })
+            resp = requests.post(
+                f"{DEMO_BUILDER_API_URL}/api/batch/ingest",
+                json={"queue_id": jid},
+                timeout=310,
+            )
+            result = resp.json()
+            if result.get("ok"):
+                session_id = result["session_id"]
+                try:
+                    sessions = supabase_get("sessions", {
+                        "id": f"eq.{session_id}",
+                        "select": "generated_sql",
+                    })
+                    if sessions and sessions[0].get("generated_sql"):
+                        save_snapshot(
+                            None, name, session_id,
+                            sessions[0]["generated_sql"],
+                            allow_versioning=False,
+                        )
+                except Exception as e:
+                    print(f"  [SNAP] {e}")
+                print(f"  [S5] ✓ session {session_id[:8]}  {result.get('stats')}")
+            else:
+                err = (result.get("error") or "assembly failed")[:500]
+                supabase_patch("batch_queue", {"id": f"eq.{jid}"}, {
+                    "status": "failed",
+                    "error": err,
+                    "updated_at": _now_iso(),
+                })
+                print(f"  [S5] ✗ {err}")
+        except Exception as e:
+            supabase_patch("batch_queue", {"id": f"eq.{jid}"}, {
+                "status": "failed",
+                "error": str(e)[:500],
+                "updated_at": _now_iso(),
+            })
+            print(f"  [S5] error: {e}")
+
+
+# ── Batch wave submit / poll helpers ────────────────────────────────────────
+
+def _submit_wave(pool_status, submitted_status, batch_id_col,
+                 prompt_name, build_user_message, select_cols):
+    """Generic stage-wave submitter.
+      pool_status:      e.g. 'pool_discover'
+      submitted_status: e.g. 'batch_discover_submitted'
+      batch_id_col:     column to write the batch id into
+      prompt_name:      key in _STAGE_PROMPTS
+      build_user_message(row) -> user-message string
+      select_cols:      Supabase select list (comma-separated)
+    """
+    if not _anthropic:
+        return
+    system_prompt = _STAGE_PROMPTS.get(prompt_name)
+    if not system_prompt:
+        print(f"  [BATCH] missing prompt {prompt_name} — skipping")
+        return
+    try:
+        pool = supabase_get("batch_queue", {
+            "status": f"eq.{pool_status}",
+            "select": select_cols,
+            "order": "updated_at.asc",
+            "limit": str(WAVE_MAX_SIZE),
+        })
+    except Exception as e:
+        print(f"  [BATCH] fetch pool {pool_status}: {e}")
+        return
+
+    if not _wave_is_ready(pool):
+        return
+
+    pool = pool[:WAVE_MAX_SIZE]
+
+    requests_list = []
+    for row in pool:
+        try:
+            user_msg = build_user_message(row)
+        except Exception as e:
+            print(f"  [BATCH] build user msg for {row['id'][:8]}: {e}")
+            continue
+        if not user_msg:
+            continue
+        requests_list.append({
+            "custom_id": row["id"],
+            "params": {
+                "model": BATCH_MODEL,
+                "max_tokens": 32000,
+                "system": [{
+                    "type": "text",
+                    "text": system_prompt,
+                    "cache_control": {"type": "ephemeral"},
+                }],
+                "messages": [{"role": "user", "content": user_msg}],
+            },
+        })
+
+    if not requests_list:
+        return
+
+    try:
+        batch = _anthropic.messages.batches.create(requests=requests_list)
+    except Exception as e:
+        msg = str(e)
+        if _API_LIMIT_PHRASE in msg.lower():
+            print(f"  [BATCH] API limit hit on create — rows stay in pool")
+            return
+        print(f"  [BATCH] create failed: {e}")
+        return
+
+    now = _now_iso()
+    for row in pool[:len(requests_list)]:
+        supabase_patch("batch_queue", {"id": f"eq.{row['id']}"}, {
+            "status": submitted_status,
+            batch_id_col: batch.id,
+            "stage_custom_id": row["id"],
+            "batch_submitted_at": now,
+            "updated_at": now,
+        })
+    print(f"  [BATCH] submitted {len(requests_list)} requests  {batch.id} ({pool_status})")
+
+
+def _poll_waves(submitted_status, batch_id_col, result_col, next_status,
+                parse_result, retain_on_failed=None):
+    """Generic stage-wave poller. For each distinct in-flight batch_id, retrieve
+    status; when ended, stream results and update rows.
+      parse_result(message_text) -> (ok, parsed_json_or_error_string)
+      retain_on_failed: optional status to set on rows whose request errored
+                       (default: 'failed')
+    """
+    if not _anthropic:
+        return
+    try:
+        rows = supabase_get("batch_queue", {
+            "status": f"eq.{submitted_status}",
+            "select": f"id,{batch_id_col},last_polled_at",
+            "limit": "500",
+        })
+    except Exception as e:
+        print(f"  [POLL] fetch {submitted_status}: {e}")
+        return
+    if not rows:
+        return
+
+    batch_ids = {r.get(batch_id_col) for r in rows if r.get(batch_id_col)}
+    for bid in batch_ids:
+        try:
+            status = _anthropic.messages.batches.retrieve(bid)
+        except Exception as e:
+            print(f"  [POLL] retrieve {bid}: {e}")
+            continue
+        if status.processing_status != "ended":
+            continue
+
+        try:
+            results_iter = _anthropic.messages.batches.results(bid)
+        except Exception as e:
+            print(f"  [POLL] results {bid}: {e}")
+            continue
+
+        for entry in results_iter:
+            cid = entry.custom_id
+            result = entry.result
+            if result.type == "succeeded":
+                try:
+                    text = result.message.content[0].text
+                except Exception:
+                    text = ""
+                ok, parsed = parse_result(text)
+                if ok:
+                    supabase_patch("batch_queue", {"id": f"eq.{cid}"}, {
+                        "status": next_status,
+                        result_col: parsed,
+                        "last_polled_at": _now_iso(),
+                        "updated_at": _now_iso(),
+                    })
+                else:
+                    supabase_patch("batch_queue", {"id": f"eq.{cid}"}, {
+                        "status": retain_on_failed or "failed",
+                        "error": (parsed or "unparseable AI response")[:500],
+                        "last_polled_at": _now_iso(),
+                        "updated_at": _now_iso(),
+                    })
+            else:
+                err_type = getattr(result, "type", "errored")
+                err_msg = f"batch {err_type}"
+                supabase_patch("batch_queue", {"id": f"eq.{cid}"}, {
+                    "status": retain_on_failed or "failed",
+                    "error": err_msg[:500],
+                    "last_polled_at": _now_iso(),
+                    "updated_at": _now_iso(),
+                })
+        print(f"  [POLL] drained batch {bid}")
+
+
+# ── Stage-specific wave builders + parsers ──────────────────────────────────
+
+def _build_discover_msg(row):
+    html = row.get("homepage_html") or ""
+    if not html:
+        return None
+    return (
+        f"Base URL: {row.get('menu_url')}\n\n"
+        f"Homepage HTML (trimmed):\n{html[:18_000]}"
+    )
+
+
+def _parse_discover(text):
+    obj = _parse_ai_json(text)
+    if not isinstance(obj, dict):
+        return False, "not JSON"
+    url = obj.get("url")
+    if not url:
+        return False, "no url returned"
+    return True, {"discover_url": url, "confidence": obj.get("confidence")}
+
+
+def _build_extract_msg(row):
+    raw = row.get("raw_text") or ""
+    if not raw:
+        return None
+    return f"Restaurant: {row.get('name')}\n\nMenu page text:\n{raw[:30_000]}"
+
+
+def _parse_extract(text):
+    obj = _parse_ai_json(text)
+    if not isinstance(obj, dict):
+        return False, "not JSON"
+    if not obj.get("items"):
+        return False, "no items"
+    return True, obj
+
+
+def _build_modifier_msg(row):
+    extraction = row.get("extraction_result") or {}
+    items = extraction.get("items") or []
+    if not items:
+        return None
+    slim = [{
+        "Menu Item Full Name": i.get("Menu Item Full Name"),
+        "Menu Item Group": i.get("Menu Item Group"),
+        "Menu Item Category": i.get("Menu Item Category"),
+    } for i in items[:200]]
+    payload = {
+        "restaurantType": extraction.get("restaurantType") or row.get("restaurant_type") or "other",
+        "items": slim,
+    }
+    return json.dumps(payload)
+
+
+def _parse_modifier(text):
+    obj = _parse_ai_json(text)
+    if not isinstance(obj, dict):
+        return False, "not JSON"
+    if "modifierTemplates" not in obj:
+        return False, "no modifierTemplates"
+    return True, obj
+
+
+def _build_branding_msg(row):
+    html = (row.get("homepage_html") or "")[:18_000]
+    return json.dumps({
+        "url": row.get("menu_url"),
+        "name": row.get("name"),
+        "restaurantType": row.get("restaurant_type") or "other",
+        "html_snippet": html,
+    })
+
+
+def _parse_branding(text):
+    obj = _parse_ai_json(text)
+    if not isinstance(obj, dict):
+        return False, "not JSON"
+    if not obj.get("buttons_background_color"):
+        return False, "no buttons_background_color"
+    return True, obj
+
+
+# ── Discover poller specialization: writes menu_url + transitions state ────
+
+def _poll_discover_waves():
+    """Poll discover batches — results need to flip to ready_for_extract and
+    set menu_url from the AI result, not into a result_col."""
+    if not _anthropic:
+        return
+    try:
+        rows = supabase_get("batch_queue", {
+            "status": "eq.batch_discover_submitted",
+            "select": "id,discover_batch_id",
+            "limit": "500",
+        })
+    except Exception as e:
+        print(f"  [POLL-S1] fetch: {e}")
+        return
+    if not rows:
+        return
+    batch_ids = {r.get("discover_batch_id") for r in rows if r.get("discover_batch_id")}
+    for bid in batch_ids:
+        try:
+            status = _anthropic.messages.batches.retrieve(bid)
+        except Exception as e:
+            print(f"  [POLL-S1] retrieve {bid}: {e}")
+            continue
+        if status.processing_status != "ended":
+            continue
+        try:
+            results_iter = _anthropic.messages.batches.results(bid)
+        except Exception as e:
+            print(f"  [POLL-S1] results {bid}: {e}")
+            continue
+
+        for entry in results_iter:
+            cid = entry.custom_id
+            result = entry.result
+            if result.type == "succeeded":
+                try:
+                    text = result.message.content[0].text
+                except Exception:
+                    text = ""
+                ok, parsed = _parse_discover(text)
+                if ok:
+                    supabase_patch("batch_queue", {"id": f"eq.{cid}"}, {
+                        "status": "ready_for_extract",
+                        "menu_url": parsed["discover_url"],
+                        "last_polled_at": _now_iso(),
+                        "updated_at": _now_iso(),
+                    })
+                else:
+                    supabase_patch("batch_queue", {"id": f"eq.{cid}"}, {
+                        "status": "failed",
+                        "error": (parsed or "no menu url")[:500],
+                        "last_polled_at": _now_iso(),
+                        "updated_at": _now_iso(),
+                    })
+            else:
+                err_type = getattr(result, "type", "errored")
+                supabase_patch("batch_queue", {"id": f"eq.{cid}"}, {
+                    "status": "failed",
+                    "error": f"batch {err_type}",
+                    "last_polled_at": _now_iso(),
+                    "updated_at": _now_iso(),
+                })
+        print(f"  [POLL-S1] drained {bid}")
+
+
+# ── Top-level driver ────────────────────────────────────────────────────────
+
+def run_staged_pipeline():
+    """Run one tick of the 4-stage batch pipeline: per-job advance, then
+    wave submissions, then wave polling. Safe to call each main-loop cycle."""
+    advance_stage_discover()
+    advance_stage_extract()
+    advance_stage_modifier()
+    advance_stage_branding()
+    advance_stage_assemble()
+
+    try:
+        _submit_wave(
+            pool_status="pool_discover",
+            submitted_status="batch_discover_submitted",
+            batch_id_col="discover_batch_id",
+            prompt_name="DISCOVERY_SYSTEM_PROMPT",
+            build_user_message=_build_discover_msg,
+            select_cols="id,menu_url,homepage_html,updated_at",
+        )
+        _submit_wave(
+            pool_status="pool_extract",
+            submitted_status="batch_extract_submitted",
+            batch_id_col="extract_batch_id",
+            prompt_name="MENU_EXTRACTION_SYSTEM_PROMPT",
+            build_user_message=_build_extract_msg,
+            select_cols="id,name,raw_text,updated_at",
+        )
+        _submit_wave(
+            pool_status="pool_modifier",
+            submitted_status="batch_modifier_submitted",
+            batch_id_col="modifier_batch_id",
+            prompt_name="MODIFIER_INFERENCE_SYSTEM_PROMPT",
+            build_user_message=_build_modifier_msg,
+            select_cols="id,restaurant_type,extraction_result,updated_at",
+        )
+        _submit_wave(
+            pool_status="pool_branding",
+            submitted_status="batch_branding_submitted",
+            batch_id_col="branding_batch_id",
+            prompt_name="BRANDING_TOKENS_SYSTEM_PROMPT",
+            build_user_message=_build_branding_msg,
+            select_cols="id,name,menu_url,restaurant_type,homepage_html,updated_at",
+        )
+    except Exception as e:
+        print(f"[WAVE] submit error: {e}")
+
+    try:
+        _poll_discover_waves()
+        _poll_waves(
+            submitted_status="batch_extract_submitted",
+            batch_id_col="extract_batch_id",
+            result_col="extraction_result",
+            next_status="ready_for_modifier",
+            parse_result=_parse_extract,
+        )
+        _poll_waves(
+            submitted_status="batch_modifier_submitted",
+            batch_id_col="modifier_batch_id",
+            result_col="modifier_result",
+            next_status="ready_for_branding",
+            parse_result=_parse_modifier,
+        )
+        _poll_waves(
+            submitted_status="batch_branding_submitted",
+            batch_id_col="branding_batch_id",
+            result_col="branding_result",
+            next_status="ready_to_assemble",
+            parse_result=_parse_branding,
+        )
+    except Exception as e:
+        print(f"[POLL] error: {e}")
+
+
 def _handle_process_result(job: dict, jid: str, result: dict, label: str) -> bool:
     """Handle a /api/batch/process response: save snapshot on success, log either way.
 
     Returns True on success (caller should `continue` to next job),
     False on failure (caller handles marking the job failed).
+    Raises _ApiLimitHit when the Anthropic API rate limit is hit — the caller
+    must requeue the job and stop processing further jobs this cycle.
     """
     if result.get("ok"):
         session_id = result["session_id"]
@@ -614,6 +1474,10 @@ def _handle_process_result(job: dict, jid: str, result: dict, label: str) -> boo
 
     error_msg = result.get("error", "Unknown error")
     print(f"  [{label}] Failed: {error_msg}")
+
+    if _API_LIMIT_PHRASE in error_msg.lower():
+        raise _ApiLimitHit(error_msg)
+
     return False
 
 
@@ -742,6 +1606,20 @@ def process_generate_queue():
                 "error": error_msg[:500],
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             })
+
+        except _ApiLimitHit as e:
+            # Anthropic API usage cap hit — requeue this job so it retries
+            # automatically when the limit resets, then stop processing.
+            print(f"  [LIMIT] Anthropic API limit hit — requeueing {jid[:8]} and pausing batch")
+            try:
+                supabase_patch("batch_queue", {"id": f"eq.{jid}"}, {
+                    "status": "queued",
+                    "error": None,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                })
+            except Exception:
+                pass
+            return  # stop processing further jobs this cycle
 
         except requests.Timeout:
             err = "API call timed out after 310s"
@@ -1155,9 +2033,16 @@ def main():
 
     consecutive_errors = 0
 
+    use_staged = os.environ.get("USE_STAGED_PIPELINE", "1") == "1"
+    print(f"  Pipeline : {'staged (4-stage batch)' if use_staged else 'legacy (per-job)'}")
+    print()
+
     while True:
         try:
-            process_generate_queue()  # batch generation jobs (PT → Demo Builder)
+            if use_staged:
+                run_staged_pipeline()  # 4-stage batch pipeline
+            else:
+                process_generate_queue()  # legacy per-job path
             process_queued()           # deploy jobs (Demo Builder → tablet)
             consecutive_errors = 0
 

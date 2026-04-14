@@ -10,8 +10,9 @@ function toNumber(val: string | number): number {
   return isNaN(n) ? 0 : n;
 }
 
-function toBool(val: string | boolean): boolean {
+function toBool(val: string | boolean | undefined | null): boolean {
   if (typeof val === "boolean") return val;
+  if (typeof val !== "string") return false;
   return val.toUpperCase() === "TRUE";
 }
 

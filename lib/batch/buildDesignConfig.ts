@@ -221,6 +221,81 @@ export interface BuildDesignConfigOptions {
    * an AI call. Defaults to false to preserve existing behaviour.
    */
   applyTypePalette?: boolean;
+  /**
+   * AI-inferred modifier templates from stage 3. When provided, these REPLACE
+   * the static preset templates. Each template's name is used as the link key
+   * and aiItemTemplateMap maps item names → template name (or null).
+   */
+  aiModifierTemplates?: Array<{
+    name: string;
+    sections: Array<{
+      name: string;
+      min_selections: number;
+      max_selections: number;
+      modifiers: Array<{ name: string; price: number }>;
+    }>;
+  }>;
+  aiItemTemplateMap?: Record<string, string | null>;
+  /**
+   * Branding override from stage 4. When provided, these colors override the
+   * static type palette.
+   */
+  brandingOverride?: {
+    background_color?: string;
+    buttons_background_color?: string;
+    buttons_font_color?: string;
+  };
+}
+
+/** Build AI-inferred modifier templates + wire them to items by name. */
+function assignAiModifiers(
+  items: ItemNode[],
+  aiTemplates: NonNullable<BuildDesignConfigOptions["aiModifierTemplates"]>,
+  itemMap: Record<string, string | null>,
+  restaurantType: RestaurantType,
+): { items: ItemNode[]; modifierTemplates: ModifierTemplateNode[] } {
+  const templatesByName = new Map<string, ModifierTemplateNode>();
+
+  for (const t of aiTemplates) {
+    const tid = generateId();
+    templatesByName.set(t.name, {
+      id: tid,
+      name: t.name,
+      source: "ai",
+      restaurantType,
+      sections: t.sections.map((s, sIdx) => ({
+        id: generateId(),
+        name: s.name,
+        sortOrder: sIdx,
+        minSelections: Math.max(0, s.min_selections ?? 0),
+        maxSelections: Math.max(1, s.max_selections ?? 1),
+        gridColumns: 6,
+        modifiers: s.modifiers.map((m, mIdx) => ({
+          id: generateId(),
+          name: m.name,
+          price: m.price ?? 0,
+          sortOrder: mIdx,
+          isDefault: false,
+          imageAssetId: null,
+          posImagePath: null,
+          isPizzaCrust: false,
+          isPizzaTopping: false,
+          isBarMixer: false,
+          isBarDrink: false,
+        })),
+      })),
+    });
+  }
+
+  const wiredItems = items.map((item) => {
+    const templateName = itemMap[item.name];
+    if (!templateName) return item;
+    const tmpl = templatesByName.get(templateName);
+    if (!tmpl) return item;
+    return { ...item, modifierTemplateIds: [tmpl.id] };
+  });
+
+  return { items: wiredItems, modifierTemplates: Array.from(templatesByName.values()) };
 }
 
 export function buildDesignConfig(opts: BuildDesignConfigOptions): DesignConfigV2 {
@@ -229,7 +304,15 @@ export function buildDesignConfig(opts: BuildDesignConfigOptions): DesignConfigV
   const templateKeys = opts.templateKeys ?? typePreset.templateKeys;
 
   const { groups, items: rawItems } = buildGroupsAndItems(opts.payload);
-  const { items, modifierTemplates } = assignModifiers(groups, rawItems, templateKeys);
+  const { items, modifierTemplates } =
+    opts.aiModifierTemplates && opts.aiModifierTemplates.length > 0
+      ? assignAiModifiers(
+          rawItems,
+          opts.aiModifierTemplates,
+          opts.aiItemTemplateMap ?? {},
+          opts.restaurantType,
+        )
+      : assignModifiers(groups, rawItems, templateKeys);
   const rooms = loadRooms(layoutKey);
 
   const state = {
@@ -249,6 +332,21 @@ export function buildDesignConfig(opts: BuildDesignConfigOptions): DesignConfigV
       ...config.branding,
       buttons_background_color: palette.buttons_background_color,
       buttons_font_color: palette.buttons_font_color,
+    };
+  }
+
+  if (opts.brandingOverride) {
+    config.branding = {
+      ...config.branding,
+      ...(opts.brandingOverride.background_color && {
+        background: opts.brandingOverride.background_color,
+      }),
+      ...(opts.brandingOverride.buttons_background_color && {
+        buttons_background_color: opts.brandingOverride.buttons_background_color,
+      }),
+      ...(opts.brandingOverride.buttons_font_color && {
+        buttons_font_color: opts.brandingOverride.buttons_font_color,
+      }),
     };
   }
 

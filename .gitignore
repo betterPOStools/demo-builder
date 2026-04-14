@@ -45,3 +45,7 @@ agent/.env
 
 # batch pipeline — snapshots are large SQL files, not committed
 batch/snapshots/
+
+# agent runtime state
+agent/.pt_rank_batch_state.json
+supabase/.temp/
