@@ -1,6 +1,35 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+
+function useAnimatedCount(target: number, duration = 500): number {
+  const [display, setDisplay] = useState(target);
+  const fromRef = useRef(target);
+  const rafRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    const from = fromRef.current;
+    if (from === target) return;
+    const startTime = performance.now();
+
+    function tick(now: number) {
+      const t = Math.min((now - startTime) / duration, 1);
+      const eased = 1 - Math.pow(1 - t, 3); // ease-out cubic
+      setDisplay(Math.round(from + (target - from) * eased));
+      if (t < 1) {
+        rafRef.current = requestAnimationFrame(tick);
+      } else {
+        fromRef.current = target;
+      }
+    }
+
+    if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    rafRef.current = requestAnimationFrame(tick);
+    return () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); };
+  }, [target, duration]);
+
+  return display;
+}
 import {
   CheckCircle2,
   XCircle,
@@ -75,6 +104,14 @@ export function BatchFeed() {
   const terminal  = done + failed + pdf;
   const pct       = total > 0 ? Math.round((terminal / total) * 100) : 0;
 
+  const aDone    = useAnimatedCount(done);
+  const aFailed  = useAnimatedCount(failed);
+  const aQueued  = useAnimatedCount(queued);
+  const aPdf     = useAnimatedCount(pdf);
+  const aPct     = useAnimatedCount(pct);
+  const aTerminal= useAnimatedCount(terminal);
+  const aTotal   = useAnimatedCount(total);
+
   // Feed: active first, then recent non-queued, skip plain queued
   const jobs = data?.jobs ?? [];
   const feedJobs = [
@@ -103,30 +140,30 @@ export function BatchFeed() {
         <div className="flex flex-1 flex-wrap items-center gap-x-3 gap-y-1 text-xs">
           {done > 0 && (
             <span className="text-emerald-400">
-              <span className="font-semibold tabular-nums">{done.toLocaleString()}</span>
+              <span className="font-semibold tabular-nums">{aDone.toLocaleString()}</span>
               <span className="text-slate-500"> done</span>
             </span>
           )}
           {failed > 0 && (
             <span className="text-red-400">
-              <span className="font-semibold tabular-nums">{failed.toLocaleString()}</span>
+              <span className="font-semibold tabular-nums">{aFailed.toLocaleString()}</span>
               <span className="text-slate-500"> failed</span>
             </span>
           )}
           {queued > 0 && (
             <span className="text-slate-400">
-              <span className="font-semibold tabular-nums">{queued.toLocaleString()}</span>
+              <span className="font-semibold tabular-nums">{aQueued.toLocaleString()}</span>
               <span className="text-slate-500"> queued</span>
             </span>
           )}
           {pdf > 0 && (
             <span className="text-amber-400">
-              <span className="font-semibold tabular-nums">{pdf}</span>
+              <span className="font-semibold tabular-nums">{aPdf}</span>
               <span className="text-slate-500"> pdf</span>
             </span>
           )}
           {total > 0 && (
-            <span className="text-slate-600 tabular-nums">{pct}%</span>
+            <span className="text-slate-600 tabular-nums">{aPct}%</span>
           )}
         </div>
 
@@ -145,11 +182,11 @@ export function BatchFeed() {
             <div className="h-1 w-full overflow-hidden rounded-full bg-slate-800">
               <div
                 className="h-full rounded-full bg-emerald-500 transition-all duration-700"
-                style={{ width: `${pct}%` }}
+                style={{ width: `${aPct}%` }}
               />
             </div>
             <div className="mt-1 flex justify-between text-[10px] text-slate-600">
-              <span>{terminal.toLocaleString()} of {total.toLocaleString()} processed</span>
+              <span>{aTerminal.toLocaleString()} of {aTotal.toLocaleString()} processed</span>
               {processing > 0 && (
                 <span className="text-blue-400">{processing} active</span>
               )}
