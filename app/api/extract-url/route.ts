@@ -102,7 +102,7 @@ export async function POST(request: Request) {
       const stream = client.messages.stream({
         model: "claude-haiku-4-5",
         max_tokens: extendedMode ? 24000 : 16000,
-        system: systemPrompt,
+        system: [{ type: "text", text: systemPrompt, cache_control: { type: "ephemeral" } }],
         messages: [{ role: "user", content: userMessage }],
       });
 
@@ -198,7 +198,7 @@ export async function POST(request: Request) {
         const stream = client.messages.stream({
           model: "claude-haiku-4-5",
           max_tokens: extendedMode ? 24000 : 16000,
-          system: systemPrompt,
+          system: [{ type: "text", text: systemPrompt, cache_control: { type: "ephemeral" } }],
           messages: [
             {
               role: "user",
@@ -234,7 +234,7 @@ export async function POST(request: Request) {
         const stream = client.messages.stream({
           model: "claude-sonnet-4-6",
           max_tokens: 64000,
-          system: systemPrompt,
+          system: [{ type: "text", text: systemPrompt, cache_control: { type: "ephemeral" } }],
           messages: [
             {
               role: "user",
@@ -364,7 +364,7 @@ export async function POST(request: Request) {
     const stream = client.messages.stream({
       model: "claude-haiku-4-5",
       max_tokens: extendedMode ? 24000 : 16000,
-      system: systemPrompt,
+      system: [{ type: "text", text: systemPrompt, cache_control: { type: "ephemeral" } }],
       messages: [
         {
           role: "user",
