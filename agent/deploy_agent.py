@@ -183,7 +183,7 @@ def save_snapshot(pt_record_id, name, session_id, sql, allow_versioning=False):
     return path
 
 # ---------------------------------------------------------------------------
-# Playwright JS-page fallback
+# JS-page / Cloudflare fallback helpers
 # ---------------------------------------------------------------------------
 
 # Error phrases from extract-url that indicate a JS-rendered page (not a hard failure)
@@ -192,7 +192,102 @@ _JS_CONTENT_ERRORS = (
     "no menu items",
     "inaccessible or empty",
     "blocking automated requests",
+    "invalid json",          # AI got CF challenge page / garbled HTML, couldn't parse
+    "extraction failed",     # catch-all for HTTP 500 from extract-url
 )
+
+_CF_PHRASES = ("security verification", "security service to protect")
+
+
+def _extract_ldjson_menu_text(html: str) -> str:
+    """Pull schema.org Menu ld+json from HTML and return a readable menu text block.
+
+    Many restaurant platforms (Popmenu, BentoBox, etc.) embed structured menu data
+    for SEO. This is cleaner than parsing arbitrary HTML and works even when the page
+    is a React SPA (items are server-rendered into ld+json for crawlers).
+    """
+    import re, json as _json
+    blocks = re.findall(r'<script type="application/ld\+json">(.*?)</script>', html, re.DOTALL)
+    lines = []
+    for block in blocks:
+        try:
+            data = _json.loads(block)
+        except Exception:
+            continue
+        if data.get("@type") not in ("Menu", "MenuSection"):
+            continue
+        menu_name = data.get("name", "Menu")
+        for section in data.get("hasMenuSection", [data]):  # data itself if it's a MenuSection
+            section_name = section.get("name", "")
+            header = f"{menu_name} — {section_name}" if section_name != menu_name else menu_name
+            lines.append(f"\n## {header}")
+            for item in section.get("hasMenuItem", []):
+                name = item.get("name", "")
+                price = item.get("offers", {}).get("price", "")
+                desc = item.get("description", "")
+                line = f"{name}"
+                if price:
+                    line += f" — ${price}"
+                if desc:
+                    line += f"\n  {desc}"
+                lines.append(line)
+    return "\n".join(lines).strip()
+
+
+def fetch_page_text_curl_cffi(url: str):
+    """Fetch page HTML using a real Chrome TLS fingerprint, bypassing Cloudflare's
+    TLS-based bot detection. Extracts schema.org ld+json menu data if present,
+    otherwise falls back to stripped visible text.
+
+    Returns None if curl_cffi is not installed or the page is still bot-blocked.
+    """
+    try:
+        from curl_cffi import requests as cffi_requests
+    except ImportError:
+        print("  [CF] curl_cffi not installed — skipping TLS-bypass fallback")
+        print("       To enable: pip3 install curl_cffi")
+        return None
+    try:
+        resp = cffi_requests.get(url, impersonate="chrome", timeout=30)
+        html = resp.text
+
+        # Detect CF challenge page (some CF configs survive TLS spoofing)
+        if any(p in html.lower() for p in _CF_PHRASES):
+            print(f"  [CF] Cloudflare challenge still active — curl_cffi couldn't bypass")
+            return None
+
+        # Try structured ld+json first — cleanest possible input for menu extraction
+        ldjson_text = _extract_ldjson_menu_text(html)
+        if ldjson_text and len(ldjson_text) > 100:
+            print(f"  [CF] Got {len(ldjson_text)} chars from ld+json structured data")
+            return ldjson_text[:40_000]
+
+        # Fall back to stripped visible text
+        from html.parser import HTMLParser
+        class _Stripper(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.parts = []
+                self._skip = False
+            def handle_starttag(self, tag, attrs):
+                if tag in ("script", "style", "noscript"):
+                    self._skip = True
+            def handle_endtag(self, tag):
+                if tag in ("script", "style", "noscript"):
+                    self._skip = False
+            def handle_data(self, data):
+                if not self._skip and data.strip():
+                    self.parts.append(data.strip())
+        s = _Stripper()
+        s.feed(html)
+        text = "\n".join(s.parts).strip()[:40_000]
+        if text and len(text) > 100:
+            print(f"  [CF] Got {len(text)} chars of stripped HTML text")
+            return text
+        return None
+    except Exception as e:
+        print(f"  [CF] curl_cffi failed: {e}")
+        return None
 
 def fetch_page_text_playwright(url: str, timeout_ms: int = 30_000):
     """Open url in headless Chromium, wait for JS to render, return body text.
@@ -298,11 +393,23 @@ def process_generate_queue():
                 error_msg = result.get("error", "Unknown error")
                 print(f"  [GEN] Failed: {error_msg}")
 
-                # If the error looks like a JS-rendered page, retry via Playwright
+                # If the error looks like a JS-rendered / inaccessible page, try fallbacks
                 is_js_failure = any(h in error_msg.lower() for h in _JS_CONTENT_ERRORS)
                 if is_js_failure and job.get("menu_url"):
-                    print(f"  [PW] JS-rendered page suspected — trying Playwright fallback")
-                    raw_text = fetch_page_text_playwright(job["menu_url"])
+                    menu_url = job["menu_url"]
+                    raw_text = None
+
+                    # Fallback 1: curl_cffi — Chrome TLS fingerprint, bypasses Cloudflare.
+                    # Also extracts schema.org ld+json structured menu data when present.
+                    print(f"  [CF] Trying curl_cffi (Chrome TLS fingerprint)...")
+                    raw_text = fetch_page_text_curl_cffi(menu_url)
+
+                    # Fallback 2: Playwright — headless browser for JS-rendered SPAs
+                    # that aren't behind Cloudflare TLS filtering.
+                    if not raw_text:
+                        print(f"  [PW] Trying Playwright (headless Chromium)...")
+                        raw_text = fetch_page_text_playwright(menu_url)
+
                     if raw_text and len(raw_text) > 100:
                         # Re-claim the job (route requires status='processing')
                         supabase_patch("batch_queue", {"id": f"eq.{jid}"}, {
@@ -316,7 +423,6 @@ def process_generate_queue():
                         )
                         result = resp2.json()
                         if result.get("ok"):
-                            # Success — handle same as normal success path
                             session_id = result["session_id"]
                             try:
                                 sessions = supabase_get("sessions", {
@@ -334,13 +440,13 @@ def process_generate_queue():
                             except Exception as e:
                                 print(f"  [SNAP] Could not save local snapshot: {e}")
                             stats = result.get("stats", {})
-                            print(f"  [PW] Done — session {session_id[:8]}, {stats}")
+                            print(f"  [RETRY] Done — session {session_id[:8]}, {stats}")
                             continue  # skip the mark-failed below
                         else:
-                            error_msg = result.get("error", "Playwright retry failed")
-                            print(f"  [PW] Retry failed: {error_msg}")
+                            error_msg = result.get("error", "Fallback retry failed")
+                            print(f"  [RETRY] Failed: {error_msg}")
                     else:
-                        print("  [PW] Playwright returned no usable text")
+                        print("  [RETRY] Both fallbacks returned no usable text")
 
                 supabase_patch("batch_queue", {"id": f"eq.{jid}"}, {
                     "status": "failed",
