@@ -33,5 +33,17 @@ export async function GET(): Promise<Response> {
   const counts = Object.fromEntries(countsRes) as Record<string, number>;
   const jobs = jobsRes.data ?? [];
 
-  return Response.json({ counts, jobs });
+  return Response.json({ counts, jobs }, {
+    headers: { "Access-Control-Allow-Origin": "*" },
+  });
+}
+
+export async function OPTIONS(): Promise<Response> {
+  return new Response(null, {
+    status: 204,
+    headers: {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, OPTIONS",
+    },
+  });
 }
