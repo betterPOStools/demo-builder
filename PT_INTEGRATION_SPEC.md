@@ -355,7 +355,7 @@ Show on **all lead cards**, regardless of snapshot status. There is no condition
 Open Demo Builder in a new browser tab at this URL:
 
 ```
-https://demo-builder.vercel.app/?menu_url=<encoded>&name=<encoded>&type=<encoded>&pt_record_id=<record_id>
+https://demo-builder-seven.vercel.app/?menu_url=<encoded>&name=<encoded>&type=<encoded>&pt_record_id=<record_id>
 ```
 
 Construct the URL as follows:
@@ -367,7 +367,7 @@ params.set("name", lead.name);
 if (record.type) params.set("type", record.type);
 params.set("pt_record_id", record.id);
 
-const url = `https://demo-builder.vercel.app/?${params.toString()}`;
+const url = `https://demo-builder-seven.vercel.app/?${params.toString()}`;
 window.open(url, "_blank", "noopener,noreferrer");
 ```
 
