@@ -194,7 +194,7 @@ _JS_CONTENT_ERRORS = (
     "blocking automated requests",
 )
 
-def fetch_page_text_playwright(url: str, timeout_ms: int = 30_000) -> str | None:
+def fetch_page_text_playwright(url: str, timeout_ms: int = 30_000):
     """Open url in headless Chromium, wait for JS to render, return body text.
 
     Returns None if playwright is not installed or the fetch fails — callers
@@ -210,10 +210,19 @@ def fetch_page_text_playwright(url: str, timeout_ms: int = 30_000) -> str | None
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             page = browser.new_page()
-            page.goto(url, wait_until="networkidle", timeout=timeout_ms)
+            # Use domcontentloaded (not networkidle) — many restaurant sites have
+            # persistent analytics/ads that never reach networkidle
+            page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+            # Give JS 5 seconds to render dynamic menu content after DOM load
+            page.wait_for_timeout(5_000)
             text = page.inner_text("body")
             browser.close()
             trimmed = text.strip()[:40_000]
+            # Detect Cloudflare bot challenge — bail early rather than sending
+            # 278 chars of "Performing security verification" to the AI
+            if "security verification" in trimmed.lower() or "security service to protect" in trimmed.lower():
+                print(f"  [PW] Cloudflare bot protection detected — cannot scrape")
+                return None
             print(f"  [PW] Got {len(trimmed)} chars from {url}")
             return trimmed or None
     except Exception as e:
