@@ -6,7 +6,7 @@
 
 import { createServerClient } from "@/lib/supabase/server";
 
-type BatchQueueStatus = "queued" | "processing" | "done" | "failed";
+type BatchQueueStatus = "queued" | "processing" | "done" | "failed" | "needs_pdf";
 type ResultStatus = "no_snapshot" | BatchQueueStatus;
 
 interface BatchQueueRow {

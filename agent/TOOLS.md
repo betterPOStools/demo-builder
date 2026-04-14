@@ -23,6 +23,72 @@
 | `POS_IMAGES_DIR` | — | `C:\Program Files\Pecan Solutions\Pecan POS\images` | Image destination on POS |
 | `POLL_INTERVAL` | — | `5` | Seconds between Supabase polls |
 
+**Key functions:**
+
+### `discover_menu_url(homepage_url: str) -> dict`
+
+Resolves a restaurant homepage (or any URL) to an actual menu page before extraction. Returns `{"type": str, "url": str}` where `type` is one of:
+
+| Type | Meaning | Dispatch |
+|------|---------|----------|
+| `ldjson` | ld+json Menu data found on the provided URL itself | Extract directly via `extract_ldjson_full_menu()` |
+| `html` | Nav link to a menu page on the same domain | Proceed with extraction on discovered URL |
+| `platform` | Menu hosted on a known platform (Toast, Square, Popmenu, etc.) | Standard pipeline on discovered URL |
+| `pdf` | Menu link resolves to a `.pdf` file | Set `batch_queue.status = 'needs_pdf'`, skip |
+| `not_found` | No credible menu link found | Fall through to extraction on original URL |
+
+Scoring: exact path match (`/menu`, `/menus`, `/food`) > href keyword > anchor text keyword. Never throws — exceptions return `not_found`.
+
+Constants used: `_MENU_HREF_KW`, `_MENU_TEXT_KW`, `_PLATFORM_HOSTS`, `_PDF_RE`.
+
+### `extract_ldjson_full_menu(menu_url: str) -> str | None`
+
+Extracts complete menu text from schema.org `application/ld+json` blocks across all section pages. Returns merged plain text (up to 40,000 chars) or `None` if < 100 chars found.
+
+1. `curl_cffi GET menu_url` — parse ld+json from first page + collect same-domain `/menus/*` section URLs from HTML nav
+2. `ThreadPoolExecutor(max_workers=8)` — concurrent `curl_cffi GET` on remaining section URLs
+3. Merge all `_extract_ldjson_menu_text()` results
+4. Logs `[LD] N sections, M items`
+
+**Why:** Restaurant platforms (Popmenu, BentoBox, schema.org-compliant sites) embed full structured menu data as ld+json for SEO. Extracting this way is free (~3–5s, zero AI tokens), vs 30–90s + ~$0.03–0.05/restaurant via the AI pipeline.
+
+**Constraint:** Only extracts from same-domain `/menus/*` section URLs. Platform sites that load menu data dynamically via XHR after page load (e.g. pure SPA menus) will return `None` and fall through to the AI pipeline.
+
+### `_handle_process_result(job, jid, result, label) -> bool`
+
+DRY helper — given a process-route response `result` dict, calls `save_snapshot()` on success and marks the job failed on error. Returns `True` if the job completed successfully. `label` is a short string (`[GEN]`, `[CF]`, `[PW]`, `[LD]`) used in log output. Eliminates duplicate success/failure handling across the four dispatch paths in `process_generate_queue()`.
+
+### `process_generate_queue()` dispatch order
+
+```
+For each queued job:
+1. Claim → status = "processing"
+2. discover_menu_url(menu_url)
+   → pdf:       PATCH status = "needs_pdf", continue
+   → other:     use discovered URL; PATCH menu_url if different
+3. extract_ldjson_full_menu(menu_url)
+   → text:      POST /api/batch/process with {queue_id, raw_text}  [LD path]
+   → None:      fall through
+4. POST /api/batch/process with {queue_id}                         [GEN path — Vercel fetches URL]
+   → success:   save_snapshot, done
+   → CF/JS err: fall through
+5. curl_cffi fetch → POST with {queue_id, raw_text}                [CF path]
+   → success:   save_snapshot, done
+   → fail:      fall through
+6. Playwright fetch → POST with {queue_id, raw_text}               [PW path]
+   → CF detected: fail
+   → success:   save_snapshot, done
+   → fail:      mark failed
+```
+
+### `needs_pdf` status lifecycle
+
+Set by `process_generate_queue()` when `discover_menu_url()` returns `type = "pdf"`. The agent PATCHes `batch_queue.status = "needs_pdf"` and moves to the next job — no extraction is attempted. This status is terminal for the mechanical batch pass.
+
+**Second queue (not yet implemented):** A separate agent pass will pick up `needs_pdf` rows and use Sonnet vision to extract the PDF menu. Until then, rows in this state stay at `needs_pdf` indefinitely. Resetting them to `queued` will cause the agent to re-discover the PDF link and set `needs_pdf` again.
+
+---
+
 **Constraints & iteration history:**
 
 - **Turso migration (2026-04-10) — rolled back:** Agent was rewritten to use Turso HTTP API (`/v2/pipeline`) instead of Supabase. Hit a network-level block — Turso endpoint was unreachable from both the agent and Vercel edge functions on the demo location network. Rolled back to Supabase within the same day.

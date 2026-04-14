@@ -27,12 +27,15 @@ Environment variables (in .env):
 import base64
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from urllib.parse import urljoin, urlparse
 
 import mysql.connector
 import requests
@@ -198,6 +201,15 @@ _JS_CONTENT_ERRORS = (
 
 _CF_PHRASES = ("security verification", "security service to protect")
 
+# Menu URL discovery constants
+_MENU_HREF_KW   = ("/menu", "/menus", "/food", "/our-menu", "/food-menu", "/dining")
+_MENU_TEXT_KW   = ("menu", "food", "eat", "dine", "dining", "order online")
+_PLATFORM_HOSTS = (
+    "toasttab.com", "order.squareup.com", "popmenu.com",
+    "bentobox.com", "olo.com", "chownow.com", "menudrive.com",
+)
+_PDF_RE = re.compile(r'\.pdf(\?|$)', re.IGNORECASE)
+
 
 def _extract_ldjson_menu_text(html: str) -> str:
     """Pull schema.org Menu ld+json from HTML and return a readable menu text block.
@@ -206,7 +218,6 @@ def _extract_ldjson_menu_text(html: str) -> str:
     for SEO. This is cleaner than parsing arbitrary HTML and works even when the page
     is a React SPA (items are server-rendered into ld+json for crawlers).
     """
-    import re, json as _json
     blocks = re.findall(r'<script type="application/ld\+json">(.*?)</script>', html, re.DOTALL)
     lines = []
     for block in blocks:
@@ -326,11 +337,210 @@ def fetch_page_text_playwright(url: str, timeout_ms: int = 30_000):
 
 
 # ---------------------------------------------------------------------------
+# Menu URL discovery
+# ---------------------------------------------------------------------------
+
+def discover_menu_url(homepage_url: str) -> dict:
+    """Resolve a restaurant URL to its actual menu page before extraction.
+
+    Many PT records store a homepage URL. This function fetches that page,
+    checks for ld+json Menu data, and if absent scans nav links to find the
+    menu page. Returns a dict {"type": str, "url": str} where type is:
+      "ldjson"    — homepage already has ld+json Menu items (use url as-is)
+      "html"      — nav link found pointing to an HTML menu page
+      "platform"  — nav link points to a known ordering platform (Toast, etc.)
+      "pdf"       — nav link points to a PDF
+      "not_found" — no menu link identified; caller should try homepage url
+    Never raises — any exception returns {"type": "not_found", "url": homepage_url}.
+    """
+    try:
+        from curl_cffi import requests as cffi_requests
+    except ImportError:
+        return {"type": "not_found", "url": homepage_url}
+
+    try:
+        resp = cffi_requests.get(homepage_url, impersonate="chrome", timeout=30)
+        html = resp.text
+
+        if any(p in html.lower() for p in _CF_PHRASES):
+            print(f"  [DISC] Cloudflare on homepage — skipping discovery")
+            return {"type": "not_found", "url": homepage_url}
+
+        # If the homepage itself has ld+json menu items, use it directly
+        if len(_extract_ldjson_menu_text(html)) > 100:
+            print(f"  [DISC] ld+json Menu found on homepage")
+            return {"type": "ldjson", "url": homepage_url}
+
+        # Parse all <a> tags and score candidates
+        from html.parser import HTMLParser
+
+        class _LinkParser(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.links = []          # [(href, anchor_text)]
+                self._href = None
+                self._text = []
+            def handle_starttag(self, tag, attrs):
+                if tag == "a":
+                    self._href = dict(attrs).get("href", "")
+                    self._text = []
+            def handle_endtag(self, tag):
+                if tag == "a" and self._href:
+                    self.links.append((self._href, " ".join(self._text).strip()))
+                    self._href = None
+            def handle_data(self, data):
+                if self._href is not None:
+                    self._text.append(data.strip())
+
+        parser = _LinkParser()
+        parser.feed(html)
+
+        best_href, best_score = None, 0
+        for href, text in parser.links:
+            if not href or href.startswith(("#", "mailto:", "tel:")):
+                continue
+            abs_href = urljoin(homepage_url, href)
+            path = urlparse(abs_href).path.lower()
+            text_lower = text.lower()
+
+            score = 0
+            for kw in _MENU_HREF_KW:
+                if path in (kw, kw + "/"):
+                    score = max(score, 10)
+                elif path.startswith(kw):
+                    score = max(score, 7)
+            if any(kw in path for kw in _MENU_HREF_KW):
+                score = max(score, 5)
+            if any(kw in text_lower for kw in _MENU_TEXT_KW):
+                score = max(score, 3)
+
+            if score > best_score:
+                best_score, best_href = score, abs_href
+
+        if not best_href or best_score == 0:
+            print(f"  [DISC] No menu link found — will try homepage directly")
+            return {"type": "not_found", "url": homepage_url}
+
+        parsed = urlparse(best_href)
+        if _PDF_RE.search(best_href):
+            print(f"  [DISC] PDF menu detected: {best_href}")
+            return {"type": "pdf", "url": best_href}
+        if any(h in parsed.netloc for h in _PLATFORM_HOSTS):
+            print(f"  [DISC] Platform URL: {best_href}")
+            return {"type": "platform", "url": best_href}
+
+        print(f"  [DISC] Menu URL: {best_href}")
+        return {"type": "html", "url": best_href}
+
+    except Exception as e:
+        print(f"  [DISC] Discovery error: {e}")
+        return {"type": "not_found", "url": homepage_url}
+
+
+def extract_ldjson_full_menu(menu_url: str):
+    """Fetch all menu sections concurrently and return merged ld+json menu text.
+
+    Fetches the menu page, extracts ld+json from the first section, then
+    discovers and concurrently fetches all linked section pages (same-domain
+    /menus/* pattern — used by Popmenu and similar platforms). Returns merged
+    text (up to 40,000 chars) or None if fewer than 100 chars of menu content.
+    """
+    try:
+        from curl_cffi import requests as cffi_requests
+    except ImportError:
+        return None
+
+    def _fetch_section(url: str) -> str:
+        try:
+            r = cffi_requests.get(url, impersonate="chrome", timeout=20)
+            return _extract_ldjson_menu_text(r.text)
+        except Exception:
+            return ""
+
+    try:
+        resp = cffi_requests.get(menu_url, impersonate="chrome", timeout=30)
+        html = resp.text
+
+        if any(p in html.lower() for p in _CF_PHRASES):
+            return None
+
+        first_text = _extract_ldjson_menu_text(html)
+
+        # Discover additional section URLs — same domain, /menus/* path pattern
+        base = urlparse(menu_url)
+        seen = {menu_url}
+        section_urls = []
+        for href in re.findall(r'href=["\']([^"\']+)["\']', html):
+            abs_url = urljoin(menu_url, href)
+            p = urlparse(abs_url)
+            if p.netloc == base.netloc and "/menus/" in p.path and abs_url not in seen:
+                section_urls.append(abs_url)
+                seen.add(abs_url)
+
+        section_texts = [first_text]
+        if section_urls:
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                section_texts.extend(pool.map(_fetch_section, section_urls))
+
+        merged = "\n\n".join(t for t in section_texts if t).strip()
+        item_count = merged.count(" — $")  # rough proxy: "Name — $price" lines
+        print(f"  [LD] {len([t for t in section_texts if t])} sections, "
+              f"~{item_count} items, {len(merged)} chars")
+
+        return merged[:40_000] if len(merged) > 100 else None
+
+    except Exception as e:
+        print(f"  [LD] Full menu extraction failed: {e}")
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Batch generation queue
 # ---------------------------------------------------------------------------
 
+def _handle_process_result(job: dict, jid: str, result: dict, label: str) -> bool:
+    """Handle a /api/batch/process response: save snapshot on success, log either way.
+
+    Returns True on success (caller should `continue` to next job),
+    False on failure (caller handles marking the job failed).
+    """
+    if result.get("ok"):
+        session_id = result["session_id"]
+        try:
+            sessions = supabase_get("sessions", {
+                "id": f"eq.{session_id}",
+                "select": "generated_sql",
+            })
+            if sessions and sessions[0].get("generated_sql"):
+                save_snapshot(
+                    job["pt_record_id"],
+                    job["name"],
+                    session_id,
+                    sessions[0]["generated_sql"],
+                    allow_versioning=False,
+                )
+        except Exception as e:
+            print(f"  [SNAP] Could not save local snapshot: {e}")
+        stats = result.get("stats", {})
+        print(f"  [{label}] Done — session {session_id[:8]}, {stats}")
+        return True
+
+    error_msg = result.get("error", "Unknown error")
+    print(f"  [{label}] Failed: {error_msg}")
+    return False
+
+
 def process_generate_queue():
-    """Poll batch_queue for queued jobs and call Demo Builder /api/batch/process."""
+    """Poll batch_queue for queued jobs and orchestrate the full extraction pipeline.
+
+    Extraction priority per job:
+      1. discover_menu_url — resolve homepage → actual menu page; detect PDFs
+      2. extract_ldjson_full_menu — concurrent multi-section ld+json (free, no AI)
+      3. /api/batch/process (Vercel fetch) — let Vercel try the discovered URL
+      4. curl_cffi fallback — Chrome TLS fingerprint, bypasses Cloudflare
+      5. Playwright fallback — headless browser for JS-rendered SPAs
+    PDF menus are marked `needs_pdf` and skipped for the second vision queue.
+    """
     if not DEMO_BUILDER_API_URL:
         return
 
@@ -338,7 +548,7 @@ def process_generate_queue():
         rows = supabase_get("batch_queue", {
             "status": "eq.queued",
             "select": "id,pt_record_id,name,menu_url",
-            "limit": "3",  # process up to 3 per poll cycle
+            "limit": "3",
         })
     except Exception as e:
         print(f"[GEN] Supabase error: {e}")
@@ -349,7 +559,7 @@ def process_generate_queue():
         name = job["name"]
         print(f"\n[GEN] Job {jid[:8]}  {name}")
 
-        # Claim the job before calling the API so parallel agents don't double-process
+        # ── Claim job ──────────────────────────────────────────────────────────
         try:
             supabase_patch("batch_queue", {"id": f"eq.{jid}"}, {
                 "status": "processing",
@@ -360,99 +570,91 @@ def process_generate_queue():
             continue
 
         try:
+            # ── Discover actual menu URL ───────────────────────────────────────
+            discovery = discover_menu_url(job["menu_url"])
+
+            if discovery["type"] == "pdf":
+                # BUSINESS RULE: PDF menus are expensive (Sonnet vision). Skip in
+                # the mechanical batch pass; a separate queue handles them later.
+                supabase_patch("batch_queue", {"id": f"eq.{jid}"}, {
+                    "status": "needs_pdf",
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                })
+                print(f"  [PDF] Skipped — menu is a PDF, marked needs_pdf")
+                continue
+
+            menu_url = discovery["url"]
+
+            # Persist discovered URL so retries don't re-discover from scratch
+            if menu_url != job["menu_url"]:
+                supabase_patch("batch_queue", {"id": f"eq.{jid}"}, {
+                    "menu_url": menu_url,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                })
+
+            error_msg = "Unknown error"
+
+            # ── Try full ld+json extraction (free, no AI fetch) ────────────────
+            raw_text = extract_ldjson_full_menu(menu_url)
+            if raw_text:
+                resp = requests.post(
+                    f"{DEMO_BUILDER_API_URL}/api/batch/process",
+                    json={"queue_id": jid, "raw_text": raw_text},
+                    timeout=310,
+                )
+                result = resp.json()
+                if _handle_process_result(job, jid, result, "LD"):
+                    continue
+                # ld+json was present but AI couldn't extract items — fall through
+                # to Vercel fetch which may find menu data via other means
+                error_msg = result.get("error", "ld+json extraction failed")
+
+            # ── Let Vercel fetch the discovered URL ────────────────────────────
             resp = requests.post(
                 f"{DEMO_BUILDER_API_URL}/api/batch/process",
                 json={"queue_id": jid},
-                timeout=310,  # allow full Vercel 300s timeout + buffer
+                timeout=310,
             )
             result = resp.json()
+            if _handle_process_result(job, jid, result, "GEN"):
+                continue
 
-            if result.get("ok"):
-                session_id = result["session_id"]
-                # Fetch SQL from the created session and save locally
-                try:
-                    sessions = supabase_get("sessions", {
-                        "id": f"eq.{session_id}",
-                        "select": "generated_sql",
+            error_msg = result.get("error", "Unknown error")
+
+            # ── Fallback chain: curl_cffi → Playwright ─────────────────────────
+            is_js_failure = any(h in error_msg.lower() for h in _JS_CONTENT_ERRORS)
+            if is_js_failure:
+                raw_text = None
+                print(f"  [CF] Trying curl_cffi (Chrome TLS fingerprint)...")
+                raw_text = fetch_page_text_curl_cffi(menu_url)
+
+                if not raw_text:
+                    print(f"  [PW] Trying Playwright (headless Chromium)...")
+                    raw_text = fetch_page_text_playwright(menu_url)
+
+                if raw_text and len(raw_text) > 100:
+                    supabase_patch("batch_queue", {"id": f"eq.{jid}"}, {
+                        "status": "processing",
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
                     })
-                    if sessions and sessions[0].get("generated_sql"):
-                        save_snapshot(
-                            job["pt_record_id"],
-                            name,
-                            session_id,
-                            sessions[0]["generated_sql"],
-                            allow_versioning=False,
-                        )
-                except Exception as e:
-                    print(f"  [SNAP] Could not save local snapshot: {e}")
+                    resp2 = requests.post(
+                        f"{DEMO_BUILDER_API_URL}/api/batch/process",
+                        json={"queue_id": jid, "raw_text": raw_text},
+                        timeout=310,
+                    )
+                    result = resp2.json()
+                    if _handle_process_result(job, jid, result, "RETRY"):
+                        continue
+                    error_msg = result.get("error", "Fallback retry failed")
+                else:
+                    print("  [RETRY] Both fallbacks returned no usable text")
 
-                stats = result.get("stats", {})
-                print(f"  [GEN] Done — session {session_id[:8]}, {stats}")
-
-            else:
-                error_msg = result.get("error", "Unknown error")
-                print(f"  [GEN] Failed: {error_msg}")
-
-                # If the error looks like a JS-rendered / inaccessible page, try fallbacks
-                is_js_failure = any(h in error_msg.lower() for h in _JS_CONTENT_ERRORS)
-                if is_js_failure and job.get("menu_url"):
-                    menu_url = job["menu_url"]
-                    raw_text = None
-
-                    # Fallback 1: curl_cffi — Chrome TLS fingerprint, bypasses Cloudflare.
-                    # Also extracts schema.org ld+json structured menu data when present.
-                    print(f"  [CF] Trying curl_cffi (Chrome TLS fingerprint)...")
-                    raw_text = fetch_page_text_curl_cffi(menu_url)
-
-                    # Fallback 2: Playwright — headless browser for JS-rendered SPAs
-                    # that aren't behind Cloudflare TLS filtering.
-                    if not raw_text:
-                        print(f"  [PW] Trying Playwright (headless Chromium)...")
-                        raw_text = fetch_page_text_playwright(menu_url)
-
-                    if raw_text and len(raw_text) > 100:
-                        # Re-claim the job (route requires status='processing')
-                        supabase_patch("batch_queue", {"id": f"eq.{jid}"}, {
-                            "status": "processing",
-                            "updated_at": datetime.now(timezone.utc).isoformat(),
-                        })
-                        resp2 = requests.post(
-                            f"{DEMO_BUILDER_API_URL}/api/batch/process",
-                            json={"queue_id": jid, "raw_text": raw_text},
-                            timeout=310,
-                        )
-                        result = resp2.json()
-                        if result.get("ok"):
-                            session_id = result["session_id"]
-                            try:
-                                sessions = supabase_get("sessions", {
-                                    "id": f"eq.{session_id}",
-                                    "select": "generated_sql",
-                                })
-                                if sessions and sessions[0].get("generated_sql"):
-                                    save_snapshot(
-                                        job["pt_record_id"],
-                                        name,
-                                        session_id,
-                                        sessions[0]["generated_sql"],
-                                        allow_versioning=False,
-                                    )
-                            except Exception as e:
-                                print(f"  [SNAP] Could not save local snapshot: {e}")
-                            stats = result.get("stats", {})
-                            print(f"  [RETRY] Done — session {session_id[:8]}, {stats}")
-                            continue  # skip the mark-failed below
-                        else:
-                            error_msg = result.get("error", "Fallback retry failed")
-                            print(f"  [RETRY] Failed: {error_msg}")
-                    else:
-                        print("  [RETRY] Both fallbacks returned no usable text")
-
-                supabase_patch("batch_queue", {"id": f"eq.{jid}"}, {
-                    "status": "failed",
-                    "error": error_msg[:500],
-                    "updated_at": datetime.now(timezone.utc).isoformat(),
-                })
+            # ── Mark failed ────────────────────────────────────────────────────
+            supabase_patch("batch_queue", {"id": f"eq.{jid}"}, {
+                "status": "failed",
+                "error": error_msg[:500],
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            })
 
         except requests.Timeout:
             err = "API call timed out after 310s"
