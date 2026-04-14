@@ -107,6 +107,10 @@ export async function POST(request: Request) {
       });
 
       const response = await stream.finalMessage();
+      if (response.stop_reason === "max_tokens") {
+        console.warn("[extract-url] rawText: response truncated (max_tokens) — menu too large for single pass");
+        return Response.json({ error: "Response truncated — menu is too large for a single extraction pass" }, { status: 500 });
+      }
       const textBlock = response.content.find((b) => b.type === "text");
       if (!textBlock || textBlock.type !== "text") {
         return Response.json({ error: "No AI response" }, { status: 500 });
@@ -207,6 +211,10 @@ export async function POST(request: Request) {
           ],
         });
         response = await stream.finalMessage();
+        if (response.stop_reason === "max_tokens") {
+          console.warn("[extract-url] PDF-text: response truncated (max_tokens)");
+          return Response.json({ error: "Response truncated — PDF menu too large for text extraction" }, { status: 500 });
+        }
       } else {
         // Visual PDF → Sonnet
         const renderedPages = await renderPdfPages(buffer);
@@ -374,6 +382,10 @@ export async function POST(request: Request) {
     });
 
     const response = await stream.finalMessage();
+    if (response.stop_reason === "max_tokens") {
+      console.warn(`[extract-url] HTML: response truncated (max_tokens), source=${contentSource}`);
+      return Response.json({ error: "Response truncated — menu is too large for a single extraction pass" }, { status: 500 });
+    }
     const textBlock = response.content.find((b) => b.type === "text");
     if (!textBlock || textBlock.type !== "text") {
       return Response.json({ error: "No AI response" }, { status: 500 });

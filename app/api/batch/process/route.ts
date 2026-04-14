@@ -209,7 +209,9 @@ export async function POST(request: Request): Promise<Response> {
   } catch (err: unknown) {
     const msg = (err as Error).message ?? "Processing failed";
     console.error("[batch/process] error:", msg);
-    await markFailed(msg);
+    // DO NOT call markFailed here — the agent owns the failure lifecycle.
+    // It will retry CF/PW fallbacks, then mark failed itself after all paths exhaust.
+    // Marking failed in the route would burn the job before the agent can retry.
     return Response.json({ error: msg }, { status: 500 });
   }
 }
