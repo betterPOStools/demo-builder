@@ -71,6 +71,7 @@ PSEXEC_PATH   = os.environ.get("PSEXEC_PATH", r"C:\tools\PsExec64.exe")
 POLL_INTERVAL        = int(os.environ.get("POLL_INTERVAL", "5"))
 DEMO_BUILDER_API_URL = os.environ.get("DEMO_BUILDER_API_URL", "http://localhost:3002")
 SNAPSHOT_DIR         = os.path.expanduser(os.environ.get("SNAPSHOT_DIR", "~/Projects/demo-DBs"))
+ANTHROPIC_API_KEY    = os.environ.get("ANTHROPIC_API_KEY", "")
 
 HEADERS = {
     "apikey": SUPABASE_KEY,
@@ -189,7 +190,7 @@ def save_snapshot(pt_record_id, name, session_id, sql, allow_versioning=False):
 # JS-page / Cloudflare fallback helpers
 # ---------------------------------------------------------------------------
 
-# Error phrases from extract-url that indicate a JS-rendered page (not a hard failure)
+# Error phrases from extract-url that indicate a retryable failure (not a hard stop)
 _JS_CONTENT_ERRORS = (
     "too little content",
     "no menu items",
@@ -197,6 +198,7 @@ _JS_CONTENT_ERRORS = (
     "blocking automated requests",
     "invalid json",          # AI got CF challenge page / garbled HTML, couldn't parse
     "extraction failed",     # catch-all for HTTP 500 from extract-url
+    "truncated",             # max_tokens hit on large menu — PW renders less text
 )
 
 _CF_PHRASES = ("security verification", "security service to protect")
@@ -205,8 +207,16 @@ _CF_PHRASES = ("security verification", "security service to protect")
 _MENU_HREF_KW   = ("/menu", "/menus", "/food", "/our-menu", "/food-menu", "/dining")
 _MENU_TEXT_KW   = ("menu", "food", "eat", "dine", "dining", "order online")
 _PLATFORM_HOSTS = (
+    # Online ordering platforms — JS SPAs, no scrapable menu content
     "toasttab.com", "order.squareup.com", "popmenu.com",
     "bentobox.com", "olo.com", "chownow.com", "menudrive.com",
+    "tabit.us",           # Tabit POS online ordering — fully JS-rendered
+    "orders.co",          # Orders.co platform
+    "bopple.me",          # Bopple ordering
+    "owner.com",          # Owner.com ordering pages
+    "spoton.com",         # SpotOn ordering
+    "trycake.app",        # Cake ordering
+    "restaurantji.com",   # Menu aggregator, not primary source
 )
 _PDF_RE = re.compile(r'\.pdf(\?|$)', re.IGNORECASE)
 # Common menu page paths probed when nav-link discovery finds nothing.
@@ -302,6 +312,51 @@ def fetch_page_text_curl_cffi(url: str):
     except Exception as e:
         print(f"  [CF] curl_cffi failed: {e}")
         return None
+
+def discover_menu_url_ai(page_text: str, base_url: str):
+    """Use Haiku to identify the menu page URL from stripped homepage content.
+
+    Called only when mechanical discovery (nav scoring + common-path probe) fails.
+    Sends up to 6,000 chars of stripped homepage text to Haiku and asks it to
+    identify the menu URL. Returns an absolute URL string, or None if not found.
+
+    Cost: ~$0.001 per call (tiny input, 1-token URL output).
+    """
+    if not ANTHROPIC_API_KEY:
+        return None
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        snippet = page_text[:6_000]
+        msg = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=100,
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"This is text from a restaurant website ({base_url}).\n\n"
+                    f"{snippet}\n\n"
+                    "What URL contains this restaurant's food menu? "
+                    "Reply with ONLY the URL (absolute or relative), or reply 'none' if there is no menu link."
+                ),
+            }],
+        )
+        answer = msg.content[0].text.strip().strip('"').strip("'")
+        if not answer or answer.lower() == "none" or answer.lower().startswith("i "):
+            return None
+        # Make absolute if relative
+        if answer.startswith("/"):
+            parsed = urlparse(base_url)
+            answer = f"{parsed.scheme}://{parsed.netloc}{answer}"
+        # Basic URL sanity check
+        if not answer.startswith("http"):
+            return None
+        print(f"  [AI] Discovered menu URL: {answer}")
+        return answer
+    except Exception as e:
+        print(f"  [AI] Discovery failed: {e}")
+        return None
+
 
 def fetch_page_text_playwright(url: str, timeout_ms: int = 30_000):
     """Open url in headless Chromium, wait for JS to render, return body text.
@@ -429,11 +484,27 @@ def discover_menu_url(homepage_url: str) -> dict:
                 probe_url = base + path
                 try:
                     r2 = cffi_requests.get(probe_url, impersonate="chrome", timeout=10)
-                    if r2.status_code == 200 and len(_extract_ldjson_menu_text(r2.text)) > 100:
-                        print(f"  [DISC] Common-path probe hit: {probe_url}")
-                        return {"type": "ldjson", "url": probe_url}
+                    if r2.status_code == 200 and len(r2.text) > 500:
+                        ldjson_text = _extract_ldjson_menu_text(r2.text)
+                        if len(ldjson_text) > 100:
+                            print(f"  [DISC] Common-path probe hit (ld+json): {probe_url}")
+                            return {"type": "ldjson", "url": probe_url}
+                        # Page exists as plain HTML — return html type so GEN path
+                        # fetches the actual menu page instead of the homepage
+                        print(f"  [DISC] Common-path probe hit (html): {probe_url}")
+                        return {"type": "html", "url": probe_url}
                 except Exception:
                     pass
+            # Mechanical discovery exhausted — ask Haiku to find the menu URL
+            page_text = fetch_page_text_curl_cffi(homepage_url) or ""
+            ai_url = discover_menu_url_ai(page_text, homepage_url) if page_text else None
+            if ai_url:
+                parsed_ai = urlparse(ai_url)
+                if _PDF_RE.search(ai_url):
+                    return {"type": "pdf", "url": ai_url}
+                if any(h in parsed_ai.netloc for h in _PLATFORM_HOSTS):
+                    return {"type": "platform", "url": ai_url}
+                return {"type": "html", "url": ai_url}
             print(f"  [DISC] No menu link found — will try homepage directly")
             return {"type": "not_found", "url": homepage_url}
 
