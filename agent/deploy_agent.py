@@ -209,6 +209,9 @@ _PLATFORM_HOSTS = (
     "bentobox.com", "olo.com", "chownow.com", "menudrive.com",
 )
 _PDF_RE = re.compile(r'\.pdf(\?|$)', re.IGNORECASE)
+# Common menu page paths probed when nav-link discovery finds nothing.
+# Ordered by specificity — most sites use /menu or /food-menu.
+_COMMON_MENU_PATHS = ("/food-menu", "/menus", "/menu", "/our-menu", "/dining-menu")
 
 
 def _extract_ldjson_menu_text(html: str) -> str:
@@ -222,7 +225,7 @@ def _extract_ldjson_menu_text(html: str) -> str:
     lines = []
     for block in blocks:
         try:
-            data = _json.loads(block)
+            data = json.loads(block)
         except Exception:
             continue
         if data.get("@type") not in ("Menu", "MenuSection"):
@@ -418,6 +421,19 @@ def discover_menu_url(homepage_url: str) -> dict:
                 best_score, best_href = score, abs_href
 
         if not best_href or best_score == 0:
+            # Nav link scoring found nothing. Try probing common menu paths
+            # directly — many sites (e.g. Popmenu) don't link their menu page
+            # from the homepage nav with obvious keywords.
+            base = f"{urlparse(homepage_url).scheme}://{urlparse(homepage_url).netloc}"
+            for path in _COMMON_MENU_PATHS:
+                probe_url = base + path
+                try:
+                    r2 = cffi_requests.get(probe_url, impersonate="chrome", timeout=10)
+                    if r2.status_code == 200 and len(_extract_ldjson_menu_text(r2.text)) > 100:
+                        print(f"  [DISC] Common-path probe hit: {probe_url}")
+                        return {"type": "ldjson", "url": probe_url}
+                except Exception:
+                    pass
             print(f"  [DISC] No menu link found — will try homepage directly")
             return {"type": "not_found", "url": homepage_url}
 

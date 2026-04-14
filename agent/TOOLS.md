@@ -52,7 +52,7 @@ Extracts complete menu text from schema.org `application/ld+json` blocks across 
 
 **Why:** Restaurant platforms (Popmenu, BentoBox, schema.org-compliant sites) embed full structured menu data as ld+json for SEO. Extracting this way is free (~3–5s, zero AI tokens), vs 30–90s + ~$0.03–0.05/restaurant via the AI pipeline.
 
-**Constraint:** Only extracts from same-domain `/menus/*` section URLs. Platform sites that load menu data dynamically via XHR after page load (e.g. pure SPA menus) will return `None` and fall through to the AI pipeline.
+**Constraint:** Only extracts from same-domain `/menus/*` section URLs. Platform sites that load menu data dynamically via XHR after page load (e.g. pure SPA menus) will return `None` and fall through to the AI pipeline. **Popmenu-specific caveat:** Section pages (`/menus/salads`, etc.) only carry `@type: Restaurant` ld+json; menu items are loaded client-side. Only the first section's items are available from the static ld+json on the main `/food-menu` page — this is still useful for demos but is not a full menu. Full coverage on Popmenu requires Playwright or the AI pipeline.
 
 ### `_handle_process_result(job, jid, result, label) -> bool`
 
