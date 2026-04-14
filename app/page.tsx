@@ -263,7 +263,7 @@ export default function LibraryPage() {
     <div className="flex min-h-screen flex-col bg-[#0f1117]">
       {/* Header */}
       <div className="border-b border-slate-800 px-6 py-4">
-        <div className="mx-auto flex max-w-7xl items-center justify-between">
+        <div className="mx-auto flex max-w-4xl items-center justify-between">
           <div className="flex items-center gap-3">
             <Layers className="h-7 w-7 text-blue-500" />
             <h1 className="text-xl font-bold tracking-tight text-white">Demo Builder</h1>
@@ -277,68 +277,61 @@ export default function LibraryPage() {
         </div>
       </div>
 
-      {/* Two-column layout */}
-      <div className="mx-auto w-full max-w-7xl flex-1 px-6 py-8">
-        <div className="flex gap-6 items-start">
+      {/* Main content */}
+      <div className="mx-auto w-full max-w-4xl flex-1 px-6 py-8">
 
-          {/* Left — Projects */}
-          <div className="min-w-0 flex-1">
-            <div className="mb-6 flex items-center justify-between">
-              <div>
-                <h2 className="text-lg font-semibold text-white">Projects</h2>
-                {!loading && (
-                  <p className="text-sm text-slate-500">
-                    {sessions.length} {sessions.length === 1 ? "project" : "projects"}
-                  </p>
-                )}
-              </div>
-              <div className="relative w-56">
-                <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-slate-500" />
-                <Input
-                  placeholder="Search..."
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  className="pl-8 text-sm"
-                />
-              </div>
-            </div>
+        {/* Batch feed card — top of page */}
+        <BatchFeed />
 
-            <div className="space-y-2">
-              {loading ? (
-                Array.from({ length: 4 }).map((_, i) => (
-                  <Skeleton key={i} className="h-[62px] w-full rounded-lg" />
-                ))
-              ) : filtered.length === 0 ? (
-                <div className="flex flex-col items-center gap-3 py-16 text-center">
-                  <Layers className="h-10 w-10 text-slate-700" />
-                  <p className="text-slate-500">
-                    {search ? "No projects match your search." : "No projects yet."}
-                  </p>
-                  {!search && (
-                    <Button onClick={handleNewProject} variant="outline" className="gap-2">
-                      <Plus className="h-4 w-4" /> Start your first project
-                    </Button>
-                  )}
-                </div>
-              ) : (
-                filtered.map((s) => (
-                  <SessionRow
-                    key={s.id}
-                    session={s}
-                    onDelete={handleDelete}
-                    onDuplicate={handleDuplicate}
-                    onRename={handleRename}
-                  />
-                ))
+        {/* Projects */}
+        <div className="mb-6 flex items-center justify-between">
+          <div>
+            <h2 className="text-lg font-semibold text-white">Projects</h2>
+            {!loading && (
+              <p className="text-sm text-slate-500">
+                {sessions.length} {sessions.length === 1 ? "project" : "projects"}
+              </p>
+            )}
+          </div>
+          <div className="relative w-56">
+            <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-slate-500" />
+            <Input
+              placeholder="Search..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="pl-8 text-sm"
+            />
+          </div>
+        </div>
+
+        <div className="space-y-2">
+          {loading ? (
+            Array.from({ length: 4 }).map((_, i) => (
+              <Skeleton key={i} className="h-[62px] w-full rounded-lg" />
+            ))
+          ) : filtered.length === 0 ? (
+            <div className="flex flex-col items-center gap-3 py-16 text-center">
+              <Layers className="h-10 w-10 text-slate-700" />
+              <p className="text-slate-500">
+                {search ? "No projects match your search." : "No projects yet."}
+              </p>
+              {!search && (
+                <Button onClick={handleNewProject} variant="outline" className="gap-2">
+                  <Plus className="h-4 w-4" /> Start your first project
+                </Button>
               )}
             </div>
-          </div>
-
-          {/* Right — Batch Feed */}
-          <div className="w-80 shrink-0 sticky top-8" style={{ height: "calc(100vh - 120px)" }}>
-            <BatchFeed />
-          </div>
-
+          ) : (
+            filtered.map((s) => (
+              <SessionRow
+                key={s.id}
+                session={s}
+                onDelete={handleDelete}
+                onDuplicate={handleDuplicate}
+                onRename={handleRename}
+              />
+            ))
+          )}
         </div>
       </div>
     </div>
