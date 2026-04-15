@@ -790,12 +790,14 @@ def advance_stage_discover():
         discovery = discover_menu_url(homepage_url)
 
         if discovery["type"] == "pdf":
+            pdf_url = discovery.get("url") or ""
             supabase_patch("batch_queue", {"id": f"eq.{jid}"}, {
                 "status": "needs_pdf",
+                "menu_url": pdf_url or "",   # store actual PDF URL for Sonnet vision
                 "homepage_html": homepage_trimmed or None,
                 "updated_at": _now_iso(),
             })
-            print(f"  [S1] PDF → needs_pdf")
+            print(f"  [S1] PDF → needs_pdf  {pdf_url[:80]}")
             continue
 
         if discovery["type"] in ("ldjson", "html", "platform"):
