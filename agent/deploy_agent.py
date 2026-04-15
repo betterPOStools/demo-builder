@@ -1016,7 +1016,7 @@ def advance_stage_assemble():
     try:
         rows = supabase_get("batch_queue", {
             "status": "eq.ready_to_assemble",
-            "select": "id,name",
+            "select": "id,name,pt_record_id",
             "limit": "5",
         })
     except Exception as e:
@@ -1047,7 +1047,7 @@ def advance_stage_assemble():
                     })
                     if sessions and sessions[0].get("generated_sql"):
                         save_snapshot(
-                            None, name, session_id,
+                            job.get("pt_record_id"), name, session_id,
                             sessions[0]["generated_sql"],
                             allow_versioning=False,
                         )
