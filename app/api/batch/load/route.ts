@@ -57,11 +57,19 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   const supabase = createServerClient();
 
+  // Phase A2 (2026-04-14) stripped the `db_` prefix from batch_queue.pt_record_id
+  // but left demo_builder.sessions.pt_record_id untouched — 745 of 753 rows still
+  // carry the prefix. PT sends `db_<placeId>`, VPT sends the raw place_id. Match
+  // both so either client resolves the same session.
+  const sessionCandidates = pt_record_id.startsWith("db_")
+    ? [pt_record_id, pt_record_id.slice(3)]
+    : [pt_record_id, `db_${pt_record_id}`];
+
   // --- Look up the session ---
   const { data: sessionData, error: sessionError } = await supabase
     .from("sessions")
     .select("id, pt_record_id, deploy_status")
-    .eq("pt_record_id", pt_record_id)
+    .in("pt_record_id", sessionCandidates)
     .in("deploy_status", ["idle", "done", "failed"])
     .order("created_at", { ascending: false })
     .limit(1)
