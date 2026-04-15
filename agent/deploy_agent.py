@@ -689,6 +689,9 @@ def _fetch_homepage_html(url, max_chars=40_000):
         html = r.text or ""
         if any(p in html.lower() for p in _CF_PHRASES):
             return None
+        # Strip null bytes and other control chars that PostgreSQL TEXT rejects
+        import re as _re
+        html = _re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", html)
         return html[:max_chars]
     except Exception:
         return None
@@ -890,7 +893,7 @@ def advance_stage_extract():
 
         supabase_patch("batch_queue", {"id": f"eq.{jid}"}, {
             "status": "pool_extract",
-            "raw_text": raw[:40_000],
+            "raw_text": raw.replace("\x00", "")[:40_000],
             "updated_at": _now_iso(),
         })
         print(f"  [S2] no ld+json → pool_extract ({len(raw)} chars stashed)")

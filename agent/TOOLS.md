@@ -83,9 +83,38 @@ For each queued job:
 
 ### `needs_pdf` status lifecycle
 
-Set by `process_generate_queue()` when `discover_menu_url()` returns `type = "pdf"`. The agent PATCHes `batch_queue.status = "needs_pdf"` and moves to the next job — no extraction is attempted. This status is terminal for the mechanical batch pass.
+Set by `advance_stage_discover()` when `discover_menu_url()` returns `type = "pdf"`. The agent PATCHes `menu_url` with the actual PDF URL (not the homepage URL — this was a bug fixed in commit `b3d99b0`) and `status = "needs_pdf"`.
 
-**Second queue (not yet implemented):** A separate agent pass will pick up `needs_pdf` rows and use Sonnet vision to extract the PDF menu. Until then, rows in this state stay at `needs_pdf` indefinitely. Resetting them to `queued` will cause the agent to re-discover the PDF link and set `needs_pdf` again.
+**PDF pipeline (shipped `dae4197`):** `advance_stage_pdf()` picks up `needs_pdf` rows, validates `".pdf" in menu_url.lower()` (guard added `0571dd4`), and moves them to `pool_pdf`. `_submit_pdf_wave()` submits to Anthropic batch with Sonnet 4.6 document blocks. `_poll_pdf_waves()` drains results → `extraction_result` → `ready_for_modifier`.
+
+### 4-stage batch pipeline functions
+
+`run_staged_pipeline()` orchestrates:
+
+| Function | Input status | Output status | AI? |
+|----------|-------------|---------------|-----|
+| `advance_stage_discover()` | `queued` | `discovering` → `ready_for_extract` / `pool_discover` / `needs_pdf` / `failed` | No (mechanical nav scoring + AI fallback) |
+| `advance_stage_extract()` | `ready_for_extract` | `extracting` → `ready_for_modifier` / `pool_extract` / `failed` | No (ld+json mechanical; AI on raw_text fallback) |
+| `advance_stage_modifier()` | `ready_for_modifier` | `pool_modifier` or `ready_for_branding` | No |
+| `advance_stage_branding()` | `ready_for_branding` | `pool_branding` or `ready_to_assemble` | No (mechanical theme-color / CSS var extraction) |
+| `advance_stage_pdf()` | `needs_pdf` | `pool_pdf` | No |
+| `advance_stage_assemble()` | `ready_to_assemble` | `assembling` → `done` / `failed` | No (POST `/api/batch/ingest`) |
+| `_submit_pdf_wave()` | `pool_pdf` | `batch_pdf_submitted` | **Sonnet 4.6 vision** |
+| `_poll_pdf_waves()` | `batch_pdf_submitted` | `ready_for_modifier` / `failed` | — |
+| `submit_stage_wave(stage, ...)` | `pool_*` | `batch_*_submitted` | **Haiku 4.5** |
+| `poll_stage_waves(stage, ...)` | `batch_*_submitted` | next stage or `failed` | — |
+
+**Wave constants:** `WAVE_MIN_SIZE=20`, `WAVE_MAX_SIZE=40`, `FORCE_WAVE_AFTER_SECONDS=1800`.
+
+### `_fetch_homepage_html(url, max_chars)`
+
+Fetches homepage HTML via curl_cffi, strips Cloudflare detection phrases, and returns trimmed HTML. **Strips all PostgreSQL-incompatible control characters** before storage — null bytes and other control chars (`\x00`–`\x08`, `\x0b`, `\x0c`, `\x0e`–`\x1f`) cause HTTP 400 on Supabase PATCH:
+```python
+html = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", html)[:max_chars]
+```
+Same stripping applied to `raw_text` in `advance_stage_extract()`.
+
+**Symptom of missing strip:** `[POLL] Unhandled error (#1): 400 Client Error: Bad Request` repeating for the same row indefinitely (row gets claimed → PATCH fails → stays in `discovering`/`extracting` → re-claimed next cycle).
 
 ---
 
