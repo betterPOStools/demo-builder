@@ -75,6 +75,7 @@ export interface ParsedItem {
   image_path: string | null;
   image_url: string | null;
   color: string | null;
+  description: string | null;
 }
 
 export interface ParsedModifierTemplate {
@@ -190,6 +191,7 @@ export function parseDesignConfig(config: DesignConfigV2): ParsedDesignConfig {
       image_path: item.image_path,
       image_url: item.image_url,
       color: item.color,
+      description: item.description ?? null,
     };
 
     // Track template assignments

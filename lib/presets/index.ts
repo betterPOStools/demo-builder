@@ -71,6 +71,7 @@ export function cloneBundle(bundle: RestaurantBundle): ClonedBundle {
         posImagePath: null,
         color: null,
         active: true,
+        description: null,
       });
     }
   }

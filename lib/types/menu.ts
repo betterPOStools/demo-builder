@@ -5,6 +5,7 @@ export const COLUMNS = [
   "Menu Item Full Name",
   "Menu Item Group",
   "Menu Item Category",
+  "Menu Item Description",
   "Default Price",
   "Dine In Price",
   "Bar Price",

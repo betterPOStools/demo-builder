@@ -56,6 +56,7 @@ export interface ItemNode {
   posImagePath: string | null;
   color: string | null;
   active: boolean;
+  description: string | null;
 }
 
 export interface RoomNode {
@@ -122,6 +123,7 @@ export interface ImportedMenuItem {
   barcode: string | null;
   isFolder: boolean;
   belongsToFolder: string | null;
+  description: string | null;
 }
 
 export const DEFAULT_CATEGORIES: CategoryNode[] = [

@@ -95,6 +95,7 @@ For "items" apply these rules:
 - "Menu Item Full Name": required, never empty
 - "Menu Item Group": the specific section or sub-category as it appears on the menu (e.g., "Appetizers", "Burgers", "Coffee")
 - "Menu Item Category": must be exactly one of: "Food", "Beverages", or "Bar"
+- "Menu Item Description": the item's printed description (ingredients, prep style, allergens, tasting notes). Use the exact text from the menu, trimmed. Use "" if no description is printed.
 - "Default Price": numeric decimal — if no price is listed, use 0
 - Other price fields: numeric decimal or empty string
 - Boolean fields ("Open Price Item", "This Is A Bar Item", "This Is A Weighted Item"): exactly "TRUE" or "FALSE", default "FALSE"
@@ -305,6 +306,7 @@ Output shape:
       "Menu Item Full Name": string,
       "Menu Item Group": string,
       "Menu Item Category": "Food" | "Beverages" | "Bar",
+      "Menu Item Description": string,
       "Default Price": number,
       "Dine In Price": number | "",
       "Bar Price": number | "",
@@ -354,12 +356,12 @@ Expected output:
 {
   "restaurantType": "burger",
   "items": [
-    {"Menu Item Full Name": "The Classic", "Menu Item Group": "Burgers", "Menu Item Category": "Food", "Default Price": 11.99},
-    {"Menu Item Full Name": "The Mushroom Swiss", "Menu Item Group": "Burgers", "Menu Item Category": "Food", "Default Price": 13.49},
-    {"Menu Item Full Name": "Bacon Cheeseburger", "Menu Item Group": "Burgers", "Menu Item Category": "Food", "Default Price": 13.99},
-    {"Menu Item Full Name": "Impossible Burger", "Menu Item Group": "Burgers", "Menu Item Category": "Food", "Default Price": 14.50},
-    {"Menu Item Full Name": "Hand-Cut Fries", "Menu Item Group": "Sides", "Menu Item Category": "Food", "Default Price": 4.00},
-    {"Menu Item Full Name": "Onion Rings", "Menu Item Group": "Sides", "Menu Item Category": "Food", "Default Price": 5.50}
+    {"Menu Item Full Name": "The Classic", "Menu Item Group": "Burgers", "Menu Item Category": "Food", "Menu Item Description": "smashed beef patty, American cheese, house sauce", "Default Price": 11.99},
+    {"Menu Item Full Name": "The Mushroom Swiss", "Menu Item Group": "Burgers", "Menu Item Category": "Food", "Menu Item Description": "", "Default Price": 13.49},
+    {"Menu Item Full Name": "Bacon Cheeseburger", "Menu Item Group": "Burgers", "Menu Item Category": "Food", "Menu Item Description": "", "Default Price": 13.99},
+    {"Menu Item Full Name": "Impossible Burger", "Menu Item Group": "Burgers", "Menu Item Category": "Food", "Menu Item Description": "vegan", "Default Price": 14.50},
+    {"Menu Item Full Name": "Hand-Cut Fries", "Menu Item Group": "Sides", "Menu Item Category": "Food", "Menu Item Description": "", "Default Price": 4.00},
+    {"Menu Item Full Name": "Onion Rings", "Menu Item Group": "Sides", "Menu Item Category": "Food", "Menu Item Description": "", "Default Price": 5.50}
   ]
 }
 

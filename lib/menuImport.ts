@@ -49,6 +49,7 @@ function parseMenuRow(row: MenuRow): ImportedMenuItem {
     barcode: row["Barcode"] || null,
     isFolder: toBool(row["Item Folder"]),
     belongsToFolder: row["Belongs To Item Folder"] || null,
+    description: row["Menu Item Description"] || null,
   };
 }
 

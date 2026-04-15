@@ -269,9 +269,11 @@ export function generateFullDeployment(opts: {
 
     const itemColorSql = item.color ? `'${esc(item.color)}'` : "NULL";
 
+    const itemDescSql = item.description ? `'${esc(item.description)}'` : "NULL";
+
     statements.push(
       `REPLACE INTO \`menuitems\` ` +
-        `(\`Id\`, \`Name\`, \`RowIndex\`, \`ColumnIndex\`, \`Index\`, ` +
+        `(\`Id\`, \`Name\`, \`Description\`, \`RowIndex\`, \`ColumnIndex\`, \`Index\`, ` +
         `\`MenuGroupId\`, \`MenuCategoryId\`, \`IsHidden\`, \`IsEnabled\`, ` +
         `\`DefaultPrice\`, \`DineInPrice\`, \`BarPrice\`, ` +
         `\`PickUpPrice\`, \`TakeOutPrice\`, \`DeliveryPrice\`, ` +
@@ -280,7 +282,7 @@ export function generateFullDeployment(opts: {
         `\`IsDiscountable\`, \`DefaulModifierType\`, ` +
         `\`MenuModifierTemplateId\`, \`PicturePath\`, \`Color\`, ` +
         `\`CreatedOn\`, \`ModifiedOn\`, \`IsDeleted\`) VALUES (\n` +
-        `  '${iid}', '${esc(item.name)}', ${rowIdx}, ${colIdx}, ${itemIndex}, ` +
+        `  '${iid}', '${esc(item.name)}', ${itemDescSql}, ${rowIdx}, ${colIdx}, ${itemIndex}, ` +
         `'${gid}', ${cidSql}, 0, 1, ` +
         `${price(item.default_price)}, ${priceOrNull(item.dine_in_price)}, ${priceOrNull(item.bar_price)}, ` +
         `${priceOrNull(item.pick_up_price)}, ${priceOrNull(item.take_out_price)}, ${priceOrNull(item.delivery_price)}, ` +

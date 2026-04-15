@@ -43,6 +43,7 @@ export interface DesignConfigItem {
   image_path: string | null;
   image_url: string | null;
   color: string | null;
+  description: string | null;
 }
 
 export interface DesignConfigModifierTemplate {

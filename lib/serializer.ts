@@ -188,6 +188,7 @@ export function serializeDesignConfig(
       image_path: item.posImagePath ?? null,
       image_url: resolveImageUrl(item.imageAssetId, assetMap),
       color: item.color ?? null,
+      description: item.description ?? null,
     })),
     modifier_templates: templates.map((t) => ({
       id: t.id,

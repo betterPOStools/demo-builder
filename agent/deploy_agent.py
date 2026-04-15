@@ -1066,6 +1066,190 @@ def advance_stage_assemble():
             print(f"  [S5] error: {e}")
 
 
+# ── Stage PDF: batch PDF extraction via Sonnet vision ───────────────────────
+
+PDF_BATCH_MODEL = "claude-sonnet-4-6"
+
+def advance_stage_pdf():
+    """Move needs_pdf rows into pool_pdf so the batch submitter can pick them up.
+    There is no mechanical path for PDFs — every row goes straight to the pool."""
+    try:
+        rows = supabase_get("batch_queue", {
+            "status": "eq.needs_pdf",
+            "select": "id,name,menu_url",
+            "limit": "50",
+        })
+    except Exception as e:
+        print(f"[SPDF] Supabase error: {e}")
+        return
+
+    for job in rows:
+        jid = job["id"]
+        url = job.get("menu_url") or ""
+        if not url:
+            supabase_patch("batch_queue", {"id": f"eq.{jid}"}, {
+                "status": "failed",
+                "error": "needs_pdf but menu_url is empty",
+                "updated_at": _now_iso(),
+            })
+            continue
+        supabase_patch("batch_queue", {"id": f"eq.{jid}"}, {
+            "status": "pool_pdf",
+            "updated_at": _now_iso(),
+        })
+        print(f"[SPDF] {jid[:8]} → pool_pdf  {url[:80]}")
+
+
+def _submit_pdf_wave():
+    """Submit a batch of PDF extraction requests using claude-sonnet-4-6 vision.
+    Each request sends the PDF as a document block so Sonnet can read it visually.
+    Results are stored in extraction_result and advance to ready_for_modifier."""
+    if not _anthropic:
+        return
+    system_prompt = _STAGE_PROMPTS.get("MENU_EXTRACTION_SYSTEM_PROMPT")
+    if not system_prompt:
+        print("  [BATCH-PDF] missing MENU_EXTRACTION_SYSTEM_PROMPT — skipping")
+        return
+    try:
+        pool = supabase_get("batch_queue", {
+            "status": "eq.pool_pdf",
+            "select": "id,name,menu_url,restaurant_type,updated_at",
+            "order": "updated_at.asc",
+            "limit": str(WAVE_MAX_SIZE),
+        })
+    except Exception as e:
+        print(f"  [BATCH-PDF] fetch pool_pdf: {e}")
+        return
+
+    if not _wave_is_ready(pool):
+        return
+
+    pool = pool[:WAVE_MAX_SIZE]
+    requests_list = []
+    for row in pool:
+        url = row.get("menu_url") or ""
+        if not url:
+            continue
+        name = row.get("name") or "restaurant"
+        rtype = row.get("restaurant_type") or "other"
+        requests_list.append({
+            "custom_id": row["id"],
+            "params": {
+                "model": PDF_BATCH_MODEL,
+                "max_tokens": 32000,
+                "system": [{
+                    "type": "text",
+                    "text": system_prompt,
+                    "cache_control": {"type": "ephemeral"},
+                }],
+                "messages": [{"role": "user", "content": [
+                    {
+                        "type": "document",
+                        "source": {"type": "url", "url": url},
+                        "cache_control": {"type": "ephemeral"},
+                    },
+                    {
+                        "type": "text",
+                        "text": (
+                            f"Restaurant: {name}\nType: {rtype}\n\n"
+                            "Extract all menu items from this PDF menu. "
+                            "Follow the output schema exactly."
+                        ),
+                    },
+                ]}],
+            },
+        })
+
+    if not requests_list:
+        return
+
+    try:
+        batch = _anthropic.messages.batches.create(requests=requests_list)
+    except Exception as e:
+        msg = str(e)
+        if _API_LIMIT_PHRASE in msg.lower():
+            print(f"  [BATCH-PDF] API limit hit — rows stay in pool_pdf")
+            return
+        print(f"  [BATCH-PDF] create failed: {e}")
+        return
+
+    now = _now_iso()
+    for row in pool[:len(requests_list)]:
+        supabase_patch("batch_queue", {"id": f"eq.{row['id']}"}, {
+            "status": "batch_pdf_submitted",
+            "pdf_batch_id": batch.id,
+            "batch_submitted_at": now,
+            "updated_at": now,
+        })
+    print(f"  [BATCH-PDF] submitted {len(requests_list)} PDF requests  {batch.id}")
+
+
+def _poll_pdf_waves():
+    """Poll batch_pdf_submitted rows. On success, store extraction_result and
+    advance to ready_for_modifier (same downstream as text extraction)."""
+    if not _anthropic:
+        return
+    try:
+        rows = supabase_get("batch_queue", {
+            "status": "eq.batch_pdf_submitted",
+            "select": "id,pdf_batch_id,last_polled_at",
+            "limit": "500",
+        })
+    except Exception as e:
+        print(f"  [POLL-PDF] fetch: {e}")
+        return
+    if not rows:
+        return
+
+    batch_ids = {r.get("pdf_batch_id") for r in rows if r.get("pdf_batch_id")}
+    for bid in batch_ids:
+        try:
+            status = _anthropic.messages.batches.retrieve(bid)
+        except Exception as e:
+            print(f"  [POLL-PDF] retrieve {bid}: {e}")
+            continue
+        if status.processing_status != "ended":
+            continue
+        try:
+            results_iter = _anthropic.messages.batches.results(bid)
+        except Exception as e:
+            print(f"  [POLL-PDF] results {bid}: {e}")
+            continue
+
+        for entry in results_iter:
+            cid = entry.custom_id
+            result = entry.result
+            if result.type == "succeeded":
+                try:
+                    text = result.message.content[0].text
+                except Exception:
+                    text = ""
+                ok, parsed = _parse_extract(text)
+                if ok:
+                    supabase_patch("batch_queue", {"id": f"eq.{cid}"}, {
+                        "status": "ready_for_modifier",
+                        "extraction_result": parsed,
+                        "last_polled_at": _now_iso(),
+                        "updated_at": _now_iso(),
+                    })
+                else:
+                    supabase_patch("batch_queue", {"id": f"eq.{cid}"}, {
+                        "status": "failed",
+                        "error": (parsed or "PDF extraction: unparseable response")[:500],
+                        "last_polled_at": _now_iso(),
+                        "updated_at": _now_iso(),
+                    })
+            else:
+                err_type = getattr(result, "type", "errored")
+                supabase_patch("batch_queue", {"id": f"eq.{cid}"}, {
+                    "status": "failed",
+                    "error": f"PDF batch {err_type}",
+                    "last_polled_at": _now_iso(),
+                    "updated_at": _now_iso(),
+                })
+        print(f"  [POLL-PDF] drained batch {bid}")
+
+
 # ── Batch wave submit / poll helpers ────────────────────────────────────────
 
 def _submit_wave(pool_status, submitted_status, batch_id_col,
@@ -1381,6 +1565,7 @@ def run_staged_pipeline():
     advance_stage_modifier()
     advance_stage_branding()
     advance_stage_assemble()
+    advance_stage_pdf()
 
     try:
         _submit_wave(
@@ -1415,6 +1600,7 @@ def run_staged_pipeline():
             build_user_message=_build_branding_msg,
             select_cols="id,name,menu_url,restaurant_type,homepage_html,updated_at",
         )
+        _submit_pdf_wave()
     except Exception as e:
         print(f"[WAVE] submit error: {e}")
 
@@ -1441,6 +1627,7 @@ def run_staged_pipeline():
             next_status="ready_to_assemble",
             parse_result=_parse_branding,
         )
+        _poll_pdf_waves()
     except Exception as e:
         print(f"[POLL] error: {e}")
 

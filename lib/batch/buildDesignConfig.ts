@@ -111,6 +111,7 @@ function buildGroupsAndItems(payload: MenuItemsPayload): {
       posImagePath: null,
       color: null,
       active: true,
+      description: mi.description ?? null,
     });
   }
 

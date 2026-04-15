@@ -183,6 +183,7 @@ export const createDesignSlice: StateCreator<DesignSlice> = (set) => ({
           posImagePath: null,
           color: null,
           active: true,
+          description: mi.description ?? null,
         });
       }
 
@@ -293,6 +294,7 @@ export const createDesignSlice: StateCreator<DesignSlice> = (set) => ({
             posImagePath: null,
             color: null,
             active: true,
+            description: null,
           },
         ],
         isDirty: true,
