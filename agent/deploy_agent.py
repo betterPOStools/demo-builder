@@ -1088,12 +1088,13 @@ def advance_stage_pdf():
     for job in rows:
         jid = job["id"]
         url = job.get("menu_url") or ""
-        if not url:
+        if not url or ".pdf" not in url.lower():
             supabase_patch("batch_queue", {"id": f"eq.{jid}"}, {
                 "status": "failed",
-                "error": "needs_pdf but menu_url is empty",
+                "error": f"menu_url is not a PDF URL: {url[:120]}",
                 "updated_at": _now_iso(),
             })
+            print(f"[SPDF] {jid[:8]} → failed (not a PDF URL: {url[:60]})")
             continue
         supabase_patch("batch_queue", {"id": f"eq.{jid}"}, {
             "status": "pool_pdf",
