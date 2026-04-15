@@ -135,30 +135,70 @@ Outscraper scrape exports into fit tiers for Value Systems POS. Code lives in
 data (Outscraper JSON/XLSX) lives in `prospect-tracker/Scrapes/` and the ranking
 output targets PT workflows.
 
-## prompts/pt_rank_rubric_v7.md
+## prompts/pt_rank_rubric_v8.md (current)
 
-**Path:** `agent/prompts/pt_rank_rubric_v7.md`
+**Path:** `agent/prompts/pt_rank_rubric_v8.md` (~8446 tokens)
 **Purpose:** Explicit, versioned rubric that drives Haiku's classification decisions.
+Current production rubric used by `pt_rank_batch.py`.
 
-**What it achieves:** Stores the ranking logic as a first-class artifact — the user can
+**What it achieves:** Stores the ranking logic as a first-class artifact — user can
 read, diff, and edit the rubric without touching Python. Every version is a new file
 (copy-forward) so `prospect_rankings.rubric_version` points at the exact prompt each row
 was scored against. YAML frontmatter captures version, model, token count, change log.
 
-**Loaded by:** `pt_rank_prototype._load_rubric()` (strips frontmatter, returns body).
+**Loaded by:** `pt_rank_batch._load_rubric()` (strips frontmatter, returns body). The
+batch script derives the filename dynamically from `RUBRIC_VERSION` constant — bump the
+version string + drop a new `pt_rank_rubric_v{N}.md` to roll forward.
+
+**Output JSON schema (v8 adds 4 fields over v7):**
+```json
+{
+  "tier": "small_indie|mid_market|kiosk_tier|chain_nogo|not_a_fit",
+  "score": 0-100,
+  "reasoning": "2-4 sentences",
+  "fit_signals": [{"signal": "...", "evidence": "...", "weight": "+|-"}],
+  "concerns": ["..."],
+  "detected_pos": "clover|toast|square|skytab|spoton|lightspeed|touchbistro|revel|aloha|micros|hungerrush|harbortouch|upserve|smorefood|fronteats_zbs|popmenu_bundled|corporate_mandated|unknown|none_detected",
+  "detected_pos_evidence": "URL/text snippet",
+  "estimated_swipe_volume": "high|medium|low|unknown",
+  "swipe_volume_evidence": "reviews + category + hours reasoning"
+}
+```
 
 **Constraints & iteration history:**
 - Rubric must clear 4096 tokens for Haiku 4.5 caching (not the documented 2048 — see
-  `project_prompt_caching_gap.md`). v7 is ~4913 tokens.
+  `project_prompt_caching_gap.md`). v7 was ~4913 tokens, v8 is ~8446 tokens.
+- **v7 → v8 changes (2026-04-14):**
+  1. Breweries / bar & grills / taverns / gastropubs / pubs are ELIGIBLE by default —
+     food-serving venues use POS. v7 dumped ~52 of these into not_a_fit. Added Example E
+     (Makai Brewing) making the eligibility explicit.
+  2. Expanded competitor-POS URL whitelist: `skytab.com`, `online.skytab.com`,
+     `smorefood.com`. v7 classified these as chain_nogo; they're swappable competitors.
+  3. Explicit "DO NOT infer corporate structure from owner titles" clause. Outscraper
+     artifacts like "branch vice president" were triggering false chain_nogo.
+  4. chain_nogo threshold raised to ≥20 locations (East Coast Wings added as example).
+  5. Added Hyatt/Hilton/Marriott/IHG hotel-restaurant chain_nogo clause.
+  6. **CRITICAL per-swipe residual principle at top of rubric.** VSI revenue = per-swipe
+     fee × swipes + % × dollar volume. High-volume low-ticket merchants (coffee, quick
+     service, kiosks) can out-earn low-volume high-ticket ones. Kiosk_tier score range
+     expanded to 55-70 when volume is high. Sort sales queue by
+     `(tier, -estimated_swipe_volume, -score)`. Verbatim user quote embedded in rubric:
+     "our residuals come off per swipe so things like coffee house may actually be better
+     than they look because it's quick turnover a lot of swipes even if low revenue."
+  7. Added `detected_pos` + `estimated_swipe_volume` output fields with controlled
+     vocabularies — sales needs to know the current vendor and residual potential.
 - v7 reframed the axis around POS decision authority (not location count) after user
-  directive: "chains aren't bad. it's the big corporate change that the individuals
-  have no say with the pos used." Small regional chains are mid_market; only
+  directive: "chains aren't bad. it's the big corporate change that the individuals have
+  no say with the pos used." Small regional chains are mid_market; only
   corporate-mandated national franchisees are chain_nogo.
-- Added 4 worked examples (Thai Season / Cugino Forno 6-loc / Tropical Smoothie /
-  Takoyaki) because rule text alone didn't hold against edge cases like Cugino Forno's
-  unified website.
-- Added competitor POS URL whitelist (cloveronline.com, toasttab.com, etc.) — these are
-  PURSUE signals, not closed ecosystems.
+- 5 worked examples anchor rule text against edge cases (Thai Season, Cugino Forno 6-loc,
+  Tropical Smoothie Cafe, Takoyaki FrontEats, Makai Brewing).
+
+## prompts/pt_rank_rubric_v7.md (archived)
+
+**Path:** `agent/prompts/pt_rank_rubric_v7.md`
+**Status:** Superseded by v8. Retained for `prospect_rankings.rubric_version = 'v7-2026-04-14'`
+row lineage. Do not edit. If another revision is needed, copy v8 → v9 and diff.
 
 ## scrape_loader.py
 
@@ -268,13 +308,48 @@ Synchronous would be ~$2.80.
 - `custom_id = place_id` — used for Supabase upsert on ingest, and lets `--only-missing`
   skip already-ranked prospects by diffing against `prospect_rankings.place_id`.
 - `--poll` can run after `--submit` without keeping the process alive (state is on disk).
-  Anthropic batches have a 24h SLA; a 2229-request batch typically ends in minutes.
+  Anthropic batches have a 24h SLA; empirically 2229-request batches end in ~6 min.
 - Results use `Prefer: resolution=merge-duplicates` on the upsert so re-runs replace
   prior rankings for the same place_id.
+- **Rubric loading (2026-04-14):** `RUBRIC_VERSION = "v8-2026-04-14"` + `_load_rubric()`
+  strips YAML frontmatter and loads `prompts/pt_rank_rubric_v{major}.md` dynamically.
+  Bump version + drop a new markdown file to roll forward — no code changes needed.
+- **Ingest writes new v8 fields:** `detected_pos`, `detected_pos_evidence`,
+  `estimated_swipe_volume`, `swipe_volume_evidence`. All nullable — older `v7-*` rows
+  have NULL for these until re-ranked.
+
+## pt_rank_v8_sample.py
+
+**Path:** `agent/pt_rank_v8_sample.py`
+**Purpose:** Targeted sanity harness — re-rank a flagged subset with a new rubric
+synchronously before committing to a full batch.
+
+**What it achieves:** Loads prospects flagged by category keyword (brewery/tavern/
+bar & grill/pub/gastropub/sports bar) or URL (skytab/smorefood), fetches the stored
+v7 row from `prospect_rankings`, re-ranks each synchronously with v8 rubric,
+prints the flip matrix (old tier → new tier counts + regression flags). Does NOT write
+to Supabase — purely a dry-run QA tool.
+
+**Run:** `python3 agent/pt_rank_v8_sample.py` (uses hardcoded flag heuristics).
+
+**Constraints & iteration history:**
+- Created 2026-04-14 specifically to validate v8 changes (brewery eligibility + SkyTab/
+  Smorefood whitelist) before paying for a full 2229-row re-rank. 186 flagged prospects
+  confirmed: 40 not_a_fit→small_indie, 2 chain_nogo→small_indie, 132 unchanged, 1
+  regression. 96% cache hit rate, $0.49 synchronous.
+- Pattern is reusable: any future rubric revision should be sanity-checked against the
+  prospects the new rules are designed to affect before full re-rank.
 
 ## Storage: demo_builder.prospect_rankings
 
-**Migration:** `supabase/migrations/005_prospect_rankings.sql`
+**Migrations:**
+- `supabase/migrations/005_prospect_rankings.sql` — base table (v7)
+- `supabase/migrations/006_prospect_rankings_detected_pos.sql` — adds `detected_pos` +
+  `detected_pos_evidence` + partial index excluding `unknown`/`none_detected`
+- `supabase/migrations/007_prospect_rankings_swipe_volume.sql` — adds
+  `estimated_swipe_volume` (CHECK constraint for high/medium/low/unknown) +
+  `swipe_volume_evidence` + composite partial index
+  `(tier, estimated_swipe_volume, score DESC) WHERE tier IN (...)` for sales queue
 
 | Column | Type | Purpose |
 |--------|------|---------|
@@ -284,11 +359,51 @@ Synchronous would be ~$2.80.
 | `score` | INT 0–100 | Numeric fit score |
 | `reasoning` | TEXT | 2–4 sentence AI explanation |
 | `fit_signals`, `concerns` | JSONB | AI-produced signal array + concern array |
+| `detected_pos` | TEXT | Controlled vocab: current POS vendor for sales intel (006) |
+| `detected_pos_evidence` | TEXT | URL/text snippet backing the detection (006) |
+| `estimated_swipe_volume` | TEXT CHECK | high/medium/low/unknown — residual value proxy (007) |
+| `swipe_volume_evidence` | TEXT | reviews+category+hours reasoning (007) |
 | `sibling_locations` | INT | Count of place_ids sharing normalized name in scrape corpus |
 | `has_html_input` | BOOL | True if HTML was available at ranking time |
-| `rubric_version` | TEXT | e.g. `v7-2026-04-14` — points at rubric markdown file |
+| `rubric_version` | TEXT | e.g. `v8-2026-04-14` — points at rubric markdown file |
 | `model`, `batch_id` | TEXT | claude model + Anthropic batch id for audit |
 | `input_tokens`, `output_tokens`, `cache_read_tokens` | INT | Per-request usage |
 | `ranked_at` | TIMESTAMPTZ | When this row was scored |
 
-Indexed on `(tier, score DESC)` for leaderboard queries and `(ranked_at DESC)` for audit.
+**Indexes:**
+- `(tier, score DESC)` — leaderboard queries
+- `(ranked_at DESC)` — audit
+- `(detected_pos) WHERE detected_pos NOT IN ('unknown','none_detected')` — competitor-POS
+  filter for prospects where VSI can actively pitch a swap
+- `(tier, estimated_swipe_volume, score DESC) WHERE tier IN ('small_indie','mid_market','kiosk_tier')`
+  — sales queue sort: best fit first, then highest volume, then highest score
+
+**Sales queue SQL pattern (weighted by residual potential):**
+```sql
+SELECT place_id, name, city, state, tier, score, detected_pos, estimated_swipe_volume
+FROM demo_builder.prospect_rankings
+WHERE tier IN ('small_indie','mid_market','kiosk_tier')
+ORDER BY
+  CASE tier WHEN 'small_indie' THEN 1 WHEN 'mid_market' THEN 2 ELSE 3 END,
+  CASE estimated_swipe_volume WHEN 'high' THEN 1 WHEN 'medium' THEN 2
+       WHEN 'low' THEN 3 ELSE 4 END,
+  score DESC;
+```
+
+## Full v8 re-rank (2026-04-14)
+
+- Batch ID: `msgbatch_01V2dgHJPsGa8buwUX2F2s1R`
+- 2229/2229 succeeded, 0 errors, ~6 min wall time
+- **Tier distribution:** small_indie 48%, chain_nogo 19%, not_a_fit 19%, kiosk_tier 10%,
+  mid_market 5%. (v7 had chain_nogo 41%, not_a_fit 29%, small_indie <1% — v8 corrected
+  the over-exclusion.)
+- **Volume distribution:** high 51%, medium 22%, low 10%, unknown 18%
+- **Detected POS:** 715 none_detected (greenfield), 225 corporate_mandated, plus
+  explicit Square 3, SpotOn 3, Toast 2, Smorefood 2, Clover 1, FrontEats 1
+- **Cost:** $4.39 batch total (measured from ingested token counts). Breakdown:
+  uncached input 950K tokens = $0.48, cache reads 18.6M tokens = $0.93, output 1.19M
+  tokens = $2.98. Synchronous equivalent would have been ~$8.77.
+- **Projection lesson:** pre-v8 cost estimate was ~$1.50 — undershot by ~3× because v8
+  added 4 new output fields (detected_pos + evidence + swipe_volume + evidence) which
+  roughly doubled average response length vs v7. Future rubric revisions with new
+  output fields: re-estimate output tokens, not just input.

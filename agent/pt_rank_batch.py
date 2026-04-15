@@ -34,7 +34,7 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent / ".env")
 
 sys.path.insert(0, str(Path(__file__).parent))
-from pt_rank_prototype import RUBRIC_SYSTEM, MODEL
+from pt_rank_prototype import MODEL
 from pt_rank_unified import build_user_message
 from scrape_loader import load_prospects
 
@@ -42,7 +42,20 @@ SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 ANTHROPIC_KEY = os.environ["ANTHROPIC_API_KEY"]
 
-RUBRIC_VERSION = "v7-2026-04-14"
+RUBRIC_VERSION = "v8-2026-04-14"
+RUBRIC_PATH = Path(__file__).parent / "prompts" / f"pt_rank_rubric_{RUBRIC_VERSION.split('-')[0]}.md"
+
+
+def _load_rubric(path=RUBRIC_PATH):
+    text = path.read_text()
+    if text.startswith("---\n"):
+        end = text.find("\n---\n", 4)
+        if end != -1:
+            text = text[end + 5:]
+    return text.lstrip()
+
+
+RUBRIC_SYSTEM = _load_rubric()
 STATE_FILE = Path(__file__).parent / ".pt_rank_batch_state.json"
 
 SB_HEADERS = {
@@ -178,6 +191,10 @@ def ingest_results(batch_id, prospects_by_pid):
             "reasoning": parsed.get("reasoning"),
             "fit_signals": parsed.get("fit_signals") or [],
             "concerns": parsed.get("concerns") or [],
+            "detected_pos": parsed.get("detected_pos"),
+            "detected_pos_evidence": parsed.get("detected_pos_evidence"),
+            "estimated_swipe_volume": parsed.get("estimated_swipe_volume"),
+            "swipe_volume_evidence": parsed.get("swipe_volume_evidence"),
             "sibling_locations": int(p.get("sibling_locations") or 1),
             "has_html_input": bool(p.get("raw_text") or p.get("homepage_html")),
             "rubric_version": RUBRIC_VERSION,
