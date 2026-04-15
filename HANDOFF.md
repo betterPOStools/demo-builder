@@ -1,14 +1,62 @@
 # Demo Builder — Handoff
 
-**Last updated:** 2026-04-15
-**Status:** [IN PROGRESS] — Batch run complete (737 done / 868 failed of 1,605). PDF pipeline shipped. 4-stage batch pipeline proven at scale.
+**Last updated:** 2026-04-16
+**Status:** [IN PROGRESS] — Failure analysis complete. 744+ done, 3 bugs fixed, 57+ rows requeued. 747 SQL snapshots.
 
 ## Current state
 
 - App deployed + stable. Supabase DEV (`mqifktmmyiqzrolrvsmy`), schema `demo_builder`, Vercel-hosted.
 - Deploy agent running as `com.valuesystems.demo-builder-agent` (launchd), polling every 5s.
-- Batch pipeline complete: 737 demo databases generated, 868 failed (mostly unrecoverable JS SPAs / menu-as-image sites).
-- 664 SQL snapshots in `~/Projects/demo-DBs/`.
+- **744 done** / 861 failed of 1,605 (57 rows requeued from failure analysis session).
+- 747 SQL snapshots in `~/Projects/demo-DBs/` (backfilled 80 missing via `agent/backfill_snapshots.py`).
+
+## Recent session (2026-04-16) — Failure analysis + bug fixes
+
+### layoutKey crash in `/api/batch/ingest` ✓
+
+AI extraction returned freeform restaurant types (`"sandwich"`, `"burger"`) that aren't valid `RestaurantType` keys. `extraction.restaurantType` overwrote the valid `job.restaurant_type`, causing `TYPE_PRESETS[restaurantType]` to return `undefined` → crash on `typePreset.layoutKey` for 7 rows.
+
+Fix (commit `f17d827`): validate against `VALID_TYPES` whitelist in `app/api/batch/ingest/route.ts`. Requeued all 7 → all 7 now `done`.
+
+```typescript
+const VALID_TYPES: RestaurantType[] = [
+  "pizza", "bar_grill", "fine_dining", "cafe", "fast_casual", "fast_food",
+  "breakfast", "mexican", "asian", "seafood", "other",
+];
+const restaurantType = (
+  extractedType && VALID_TYPES.includes(extractedType as RestaurantType)
+    ? extractedType : (job.restaurant_type ?? "other")
+) as RestaurantType;
+```
+
+### Snapshot save bug in `advance_stage_assemble()` ✓
+
+`save_snapshot(None, name, ...)` passed `None` as `pt_record_id`. `get_snapshot_path` called `None.replace("-", "")` → `AttributeError` silently caught → 80 sessions assembled without local SQL snapshots.
+
+Fix (commit `c17cfe6`): fetch `pt_record_id` in the select query, pass `job.get("pt_record_id")`. Also ran `agent/backfill_snapshots.py` to write the 80 missing files retroactively.
+
+### Failure requeue (57 rows) ✓
+
+| Error | Count | Requeued to |
+|-------|-------|-------------|
+| `Could not fetch menu page text` | 39 | `queued` |
+| `not JSON` | 4 | `queued` |
+| `PDF batch errored` | 14 | `needs_pdf` |
+| `layoutKey` crash | 7 | `ready_to_assemble` |
+
+### Failure taxonomy (from Opus analysis)
+
+| Error class | Count | Notes |
+|-------------|-------|-------|
+| Extraction returned no menu items | 440 | JS SPA nav chrome — dominant issue |
+| no items | 227 | AI extracted 0 items from raw text |
+| no url returned | 89 | Discovery failed completely |
+| Homepage unreachable (CF) | 45 | Cloudflare block |
+| Could not fetch | 39 | Network/timeout (requeued) |
+| PDF batch errored | 14 | PDF Sonnet failures (requeued) |
+| not JSON | 4 | Malformed AI response (requeued) |
+
+JS SPA nav chrome (~667 combined) is the ceiling. Playwright `wait_for_selector` on menu-specific elements + ordering portal follow-through (Olo, Punchh) are the next levers.
 
 ## Recent session (2026-04-15) — PDF pipeline + bug fixes
 
