@@ -75,8 +75,16 @@ export async function POST(request: Request): Promise<Response> {
       throw new Error("No items in extraction_result — stage 2 did not complete");
     }
 
-    const restaurantType = ((extraction.restaurantType ?? job.restaurant_type) ??
-      "other") as RestaurantType;
+    const VALID_TYPES: RestaurantType[] = [
+      "pizza", "bar_grill", "fine_dining", "cafe", "fast_casual", "fast_food",
+      "breakfast", "mexican", "asian", "seafood", "other",
+    ];
+    const extractedType = extraction.restaurantType as string | undefined;
+    const restaurantType = (
+      extractedType && VALID_TYPES.includes(extractedType as RestaurantType)
+        ? extractedType
+        : (job.restaurant_type ?? "other")
+    ) as RestaurantType;
 
     const payload: MenuItemsPayload = {
       version: "1.0",
