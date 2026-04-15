@@ -247,12 +247,14 @@ def save_snapshot(pt_record_id, name, session_id, sql, allow_versioning=False):
 # Error phrases from extract-url that indicate a retryable failure (not a hard stop)
 _JS_CONTENT_ERRORS = (
     "too little content",
-    "no menu items",
+    "no menu items",              # legacy wording — keep for old rows being retried
     "inaccessible or empty",
+    "no content fetched",         # new wording: agent passed 0 raw_text + fetch returned 0 items
+    "ai extracted 0 items",       # new wording: AI ran on raw_text and returned empty items
     "blocking automated requests",
-    "invalid json",          # AI got CF challenge page / garbled HTML, couldn't parse
-    "extraction failed",     # catch-all for HTTP 500 from extract-url
-    "truncated",             # max_tokens hit on large menu — PW renders less text
+    "invalid json",               # AI got CF challenge page / garbled HTML, couldn't parse
+    "extraction failed",          # catch-all for HTTP 500 from extract-url
+    "truncated",                  # max_tokens hit on large menu — PW renders less text
 )
 
 _CF_PHRASES = ("security verification", "security service to protect")

@@ -92,7 +92,11 @@ export async function POST(request: Request): Promise<Response> {
     };
 
     if (!extracted.rows || extracted.rows.length === 0) {
-      throw new Error("Extraction returned no menu items — the menu URL may be inaccessible or empty");
+      const rawLen = body.raw_text?.length ?? 0;
+      if (rawLen === 0) {
+        throw new Error(`No content fetched from ${job.menu_url} (raw_text=0, agent sent no pre-fetched text and extract-url returned 0 items)`);
+      }
+      throw new Error(`AI extracted 0 items from ${rawLen} chars of raw_text (menu_url=${job.menu_url})`);
     }
 
     // ── 3. Build design config (headless) ───────────────────────────────────
