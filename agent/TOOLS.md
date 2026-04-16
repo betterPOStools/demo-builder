@@ -156,6 +156,49 @@ Same stripping applied to `raw_text` in `advance_stage_extract()`.
 
 ---
 
+## retag_library.py
+
+**Path:** `agent/retag_library.py`
+**Purpose:** Backfill / enrich `concept_tags` on existing `demo_builder.image_library` rows so tag-based search (`/api/library/search`) surfaces cross-restaurant matches for library-pulled image re-use.
+
+**What it achieves:** Raises the average tag count and vocabulary diversity on library entries that were seeded before the 2026-04-16 tag-enrichment rules shipped. First observed run: 133 rows averaged 5.5 tags with a 150-term vocabulary and zero rows had `food_category`; after two passes it's 8.6 avg tags, 362-term vocabulary, 131/133 with `food_category`.
+
+**Modes:**
+
+- `--pass 1` — deterministic, free. Re-tokenises `item_name`, strips noise words (`favorite`, `lexi`, `original`, etc.), fixes the unicode artefact `jalape → jalapeno`, inferred regex categories add semantic tags (`seafood` on "Blackened Mahi", `mexican` on "Quesadilla", `beef` on "Cheesesteak"), and populates `food_category` from an item-name keyword table.
+- `--pass 2` — Haiku 4.5 vision. Only fires on rows still under `MIN_TAGS=6` after pass 1. Fetches the image bytes from the public `image-library` bucket, sends with matching `media_type`, parses a JSON array of 6–10 tags, merges. Webp/png/jpeg/gif supported; SVGs are skipped (Anthropic vision doesn't accept SVG — see `memory/feedback_anthropic_vision_formats.md`).
+- `--pass both --commit` — runs both back-to-back.
+
+**Inputs / env vars (from `agent/.env`, same shape as `deploy_agent.py`):**
+
+| Var | Required | Purpose |
+|-----|----------|---------|
+| `SUPABASE_URL` | ✅ | Supabase REST URL |
+| `SUPABASE_KEY` | ✅ | Service role key (read + PATCH on `image_library`) |
+| `ANTHROPIC_API_KEY` | for pass 2 | Claude Haiku 4.5 key |
+
+**Flags:**
+
+- `--commit` (default off) — actually PATCH rows. Otherwise dry-run with a per-row diff.
+- `--limit N` — cap rows processed (handy for testing).
+- `--pass {1|2|both}` — which pass(es) to run.
+
+**Constraints & iteration history:**
+
+- **Rejected: single Haiku pass over every row.** ~$0.53 for 133 rows with zero information gain on icons whose `item_name` already determines the category. The deterministic pass is strictly cheaper and handles the majority of the lift. Vision stays gated behind `MIN_TAGS`.
+- **Rejected: LLM-based tokenisation of `item_name`.** Same argument — regex catches 90% of the cases and does it deterministically.
+- **Rejected: running a single `lib/itemTags.ts` TS port directly.** Only way to run the existing TS logic from here is via `npx tsx`; the regex set needed to grow anyway (cross-cuisine tags like "seafood" on "mahi"), and Python is the rest of the batch-pipeline lingua franca.
+- **Gotcha: SVG unsupported by Claude vision.** Initial run got HTTP 400 `"Could not process image"` on every row. Fix: `EXT_MEDIA` lookup + skip SVG rows with a log line. Only 3 SVG rows in the library were eligible — acceptable loss.
+- **Gotcha: wrong `media_type`.** First cut hardcoded `"image/png"` / fallback `"image/jpeg"`. WebP files sent as JPEG → HTTP 400. Fixed by extension lookup before the call.
+- **Dry-run semantics.** Pass 2 in dry-run mode queries the live rows; it does not re-read anything pass 1 would have modified, so dry-run-both can over-report the target set if pass 1 would have pushed rows past `MIN_TAGS`. To get an accurate preview of pass 2 after pass 1, run `--pass 1 --commit` first then `--pass 2` in dry-run.
+
+**Known issues:**
+
+- 3 SVG rows stay under `MIN_TAGS=6`. Could rasterize with `cairosvg` if it matters; today it doesn't.
+- Threshold `MIN_TAGS` is hardcoded at 6; if you want a richer library, bump it (more rows go through vision, linearly more cost).
+
+---
+
 # PT Prospect Ranking (serves Prospect Tracker)
 
 AI-driven prospect ranker for the Prospect Tracker app. Classifies restaurants from
