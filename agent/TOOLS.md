@@ -173,6 +173,23 @@ Same stripping applied to `raw_text` in `advance_stage_extract()`.
 
 ---
 
+## fix_price_nulls.py
+
+**Path:** `agent/fix_price_nulls.py`
+**Purpose:** Retroactively flip `IsOpenPriceItem = 1` on deployed items whose `DefaultPrice` ended up NULL/0, so the POS prompts the cashier instead of ringing $0.
+
+**What it achieves:** Scans `~/Projects/demo-DBs/*.sql` + Supabase `sessions.generated_sql`. For every `menuitems` INSERT row where the default-price column is 0 or NULL, rewrites the `IsOpenPriceItem` column to `1`. Idempotent.
+
+**Inputs:** same env as `fix_contrast.py`. Snapshot dir: `~/Projects/demo-DBs/`.
+
+**Flags:** `--yes` (commit), `--snapshots-only`, `--sessions-only`.
+
+**Constraints & iteration history:**
+- Root fix is in `lib/sql/deployer.ts` (auto-flip at SQL-generation time). This script handles the already-shipped corpus.
+- Regex key: column index 12 (0-indexed) of the `INSERT INTO menuitems VALUES (...)` row is `IsOpenPriceItem`. Must count commas accurately — single-quoted strings can contain commas (e.g. `'Chips, Salsa'`) so the regex has to walk the value list with quote-awareness.
+
+---
+
 ## retag_library.py
 
 **Path:** `agent/retag_library.py`

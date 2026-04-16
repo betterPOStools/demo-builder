@@ -286,7 +286,11 @@ export function generateFullDeployment(opts: {
         `'${gid}', ${cidSql}, 0, 1, ` +
         `${price(item.default_price)}, ${priceOrNull(item.dine_in_price)}, ${priceOrNull(item.bar_price)}, ` +
         `${priceOrNull(item.pick_up_price)}, ${priceOrNull(item.take_out_price)}, ${priceOrNull(item.delivery_price)}, ` +
-        `${item.is_open_price}, ${item.tax1}, ${item.tax2}, ${item.tax3}, ` +
+        // AUTO-OPEN: if DefaultPrice is 0/null (AI couldn't extract), force
+        // IsOpenPriceItem=1 so the POS prompts the cashier at ring-up instead
+        // of charging $0. This overrides the caller's is_open_price flag only
+        // in the zero-price case; real prices keep whatever the caller set.
+        `${(!item.default_price ? 1 : item.is_open_price)}, ${item.tax1}, ${item.tax2}, ${item.tax3}, ` +
         `${item.is_bar_item}, ${item.is_weighted}, ${price(item.tare)}, ${barcodeSql}, ` +
         `1, 0, ` +
         `${modTemplateId}, ${itemPicSql}, ${itemColorSql}, ` +
