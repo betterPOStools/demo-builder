@@ -49,3 +49,8 @@ batch/snapshots/
 # agent runtime state
 agent/.pt_rank_batch_state.json
 supabase/.temp/
+
+# local tooling (Claude Code, Supabase agent skills) — per-dev, not repo content
+.claude/
+.agents/
+skills-lock.json
