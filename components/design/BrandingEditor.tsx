@@ -8,8 +8,6 @@ import {
   Loader2,
   Check,
   X,
-  Trash2,
-  Library,
   Wand2,
   ScanSearch,
 } from "lucide-react";
@@ -22,6 +20,11 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { LibraryPicker } from "@/components/ui/LibraryPicker";
+import { TemplateSelector } from "@/components/ui/TemplateSelector";
+import type { ImageLibraryEntry } from "@/lib/library/types";
+import { DEFAULT_TEMPLATE_BY_SURFACE } from "@/lib/generation/templates";
+import { searchLibrary, addToLibrary } from "@/lib/library/client";
 import { useStore } from "@/store";
 import type { SavedBrandAnalysis } from "@/store/designSlice";
 import { isLightColor, generateId } from "@/lib/utils";
@@ -229,9 +232,7 @@ export function BrandingEditor() {
   const restaurantName = useStore((s) => s.restaurantName);
   const restaurantType = useStore((s) => s.restaurantType);
   const groups = useStore((s) => s.groups);
-  const imageLibrary = useStore((s) => s.imageLibrary);
   const addGeneratedImage = useStore((s) => s.addGeneratedImage);
-  const deleteGeneratedImage = useStore((s) => s.deleteGeneratedImage);
   const brandAnalyses = useStore((s) => s.brandAnalyses);
   const saveBrandAnalysis = useStore((s) => s.saveBrandAnalysis);
   const deleteBrandAnalysis = useStore((s) => s.deleteBrandAnalysis);
@@ -240,7 +241,6 @@ export function BrandingEditor() {
   const [generating, setGenerating] = useState(false);
   const [genProgress, setGenProgress] = useState("");
   const [preview, setPreview] = useState<BrandingPreview | null>(null);
-  const [showLibrary, setShowLibrary] = useState(false);
   const [lightbox, setLightbox] = useState<LightboxImage[] | null>(null);
   const [lightboxIdx, setLightboxIdx] = useState(0);
 
@@ -249,6 +249,45 @@ export function BrandingEditor() {
   const [analyzing, setAnalyzing] = useState(false);
   const [brandTokens, setBrandTokens] = useState<Record<string, unknown> | null>(null);
   const [brandError, setBrandError] = useState("");
+
+  // Mechanical palette state — free extraction from homepage HTML
+  const [extractingPalette, setExtractingPalette] = useState(false);
+  const [paletteMessage, setPaletteMessage] = useState<string | null>(null);
+
+  // Template selections — route-dispatch wiring is follow-up work.
+  const [backgroundTemplate, setBackgroundTemplate] = useState(
+    DEFAULT_TEMPLATE_BY_SURFACE.background,
+  );
+  const [sidebarTemplate, setSidebarTemplate] = useState(
+    DEFAULT_TEMPLATE_BY_SURFACE.sidebar,
+  );
+
+  async function extractMechanicalPalette() {
+    if (!brandUrl.trim()) return;
+    setExtractingPalette(true);
+    setPaletteMessage(null);
+    try {
+      const res = await fetch("/api/extract-palette", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: brandUrl.trim() }),
+      });
+      const data = await res.json();
+      if (data.found && data.palette) {
+        updateBranding({
+          buttons_background_color: data.palette.buttons_background_color,
+          buttons_font_color: data.palette.buttons_font_color,
+        });
+        setPaletteMessage(`Applied ${data.palette.buttons_background_color} from site.`);
+      } else {
+        setPaletteMessage(data.reason ?? "No brand color found in page.");
+      }
+    } catch (err) {
+      setPaletteMessage(`Failed: ${(err as Error).message}`);
+    } finally {
+      setExtractingPalette(false);
+    }
+  }
 
 
   const bg = branding.background || "#0f172a";
@@ -361,32 +400,111 @@ export function BrandingEditor() {
       const quoteMatch = styleHints.match(/"([^"]+)"/);
       const quoteText = quoteMatch?.[1];
 
+      const styleHintTags = styleHints
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, " ")
+        .split(/\s+/)
+        .filter((w) => w.length > 2);
+      const libraryTags = Array.from(
+        new Set(
+          [
+            ...imageryKeywords.slice(0, 5),
+            ...textureWords.slice(0, 3),
+            ...styleHintTags,
+            restaurantType,
+            restaurantName,
+          ].filter(Boolean) as string[],
+        ),
+      ).map((t) => t.toLowerCase());
+
+      let bgUri: string | undefined;
+      let sbUri: string | undefined;
+
+      if (backgroundTemplate === "pull-from-library") {
+        try {
+          const { entries } = await searchLibrary({
+            intent: "background",
+            tags: libraryTags,
+            restaurant_type: restaurantType ?? undefined,
+            limit: 1,
+          });
+          if (entries[0]) bgUri = entries[0].public_url;
+        } catch {
+          // Silent fallback to AI generation.
+        }
+      }
+
+      if (sidebarTemplate === "pull-from-library") {
+        try {
+          const { entries } = await searchLibrary({
+            intent: "sidebar",
+            tags: libraryTags,
+            restaurant_type: restaurantType ?? undefined,
+            limit: 1,
+          });
+          if (entries[0]) sbUri = entries[0].public_url;
+        } catch {
+          // Silent fallback to AI generation.
+        }
+      }
+
+      const needBg = !bgUri;
+      const needSb = !sbUri;
+
       const [bgData, sbData] = await Promise.all([
-        fetch("/api/fetch-photo", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ keywords, backgroundPrompt, assetType: "background", hasQuoteText: false, brandTokens, width: 1024, height: 716 }),
-        }).then((r) => r.json()),
-        fetch("/api/fetch-photo", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ keywords, sidebarPrompt, assetType: "sidebar", hasQuoteText, quoteText, brandTokens, width: 360, height: 696 }),
-        }).then((r) => r.json()),
+        needBg
+          ? fetch("/api/fetch-photo", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ keywords, backgroundPrompt, assetType: "background", hasQuoteText: false, brandTokens, width: 1024, height: 716, templateId: backgroundTemplate }),
+            }).then((r) => r.json())
+          : null,
+        needSb
+          ? fetch("/api/fetch-photo", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ keywords, sidebarPrompt, assetType: "sidebar", hasQuoteText, quoteText, brandTokens, width: 360, height: 696, templateId: sidebarTemplate }),
+            }).then((r) => r.json())
+          : null,
       ]);
 
-      // fetch-photo returns [fal] — take the fal result (index 0)
       const ts = new Date().toISOString();
-      const bgUri = bgData.results?.[0]?.dataUri as string | undefined;
-      const sbUri = sbData.results?.[0]?.dataUri as string | undefined;
+      if (needBg) bgUri = bgData?.results?.[0]?.dataUri as string | undefined;
+      if (needSb) sbUri = sbData?.results?.[0]?.dataUri as string | undefined;
       const seamlessId = (bgUri && sbUri) ? generateId() : undefined;
+      const seamlessPairId = (needBg && needSb && bgUri && sbUri) ? generateId() : undefined;
 
       if (bgUri) {
         result.backgroundPng = bgUri;
         addGeneratedImage({ id: generateId(), type: "background", dataUri: bgUri, createdAt: ts, restaurantName: restaurantName || undefined, seamlessId });
+        if (needBg && bgUri.startsWith("data:")) {
+          void addToLibrary({
+            image_type: "background",
+            original_intent: "background",
+            data_uri: bgUri,
+            template_id: backgroundTemplate,
+            concept_tags: libraryTags,
+            restaurant_type: restaurantType ?? undefined,
+            generated_for: restaurantName || undefined,
+            seamless_pair_id: seamlessPairId,
+          }).catch(() => {});
+        }
       }
       if (sbUri) {
         result.sidebarPng = sbUri;
         addGeneratedImage({ id: generateId(), type: "sidebar", dataUri: sbUri, createdAt: ts, restaurantName: restaurantName || undefined, seamlessId });
+        if (needSb && sbUri.startsWith("data:")) {
+          void addToLibrary({
+            image_type: "sidebar",
+            original_intent: "sidebar",
+            data_uri: sbUri,
+            template_id: sidebarTemplate,
+            concept_tags: libraryTags,
+            restaurant_type: restaurantType ?? undefined,
+            generated_for: restaurantName || undefined,
+            seamless_pair_id: seamlessPairId,
+          }).catch(() => {});
+        }
       }
 
       setPreview(result);
@@ -444,6 +562,47 @@ export function BrandingEditor() {
       const seamlessId = generateId();
       addGeneratedImage({ id: generateId(), type: "sidebar", dataUri: sidebarPng, createdAt: ts, restaurantName: restaurantName || undefined, seamlessId });
       addGeneratedImage({ id: generateId(), type: "background", dataUri: backgroundPng, createdAt: ts, restaurantName: restaurantName || undefined, seamlessId });
+
+      const seamlessPairId = generateId();
+      const seamlessStyleTags = styleHints
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, " ")
+        .split(/\s+/)
+        .filter((w) => w.length > 2);
+      const seamlessTags = Array.from(
+        new Set(
+          [
+            ...imageryKeywords.slice(0, 5),
+            ...textureWords.slice(0, 3),
+            ...seamlessStyleTags,
+            restaurantType,
+            restaurantName,
+          ].filter(Boolean) as string[],
+        ),
+      ).map((t) => t.toLowerCase());
+      void Promise.all([
+        addToLibrary({
+          image_type: "background",
+          original_intent: "background",
+          data_uri: backgroundPng,
+          template_id: "flux-seamless-photo",
+          concept_tags: seamlessTags,
+          restaurant_type: restaurantType ?? undefined,
+          generated_for: restaurantName || undefined,
+          seamless_pair_id: seamlessPairId,
+        }),
+        addToLibrary({
+          image_type: "sidebar",
+          original_intent: "sidebar",
+          data_uri: sidebarPng,
+          template_id: "flux-seamless-photo",
+          concept_tags: seamlessTags,
+          restaurant_type: restaurantType ?? undefined,
+          generated_for: restaurantName || undefined,
+          seamless_pair_id: seamlessPairId,
+        }),
+      ]).catch(() => {});
+
       setPreview((prev) => ({ ...prev, sidebarPng, backgroundPng }));
     } catch (err) {
       console.error("Seamless generation failed:", err);
@@ -505,31 +664,23 @@ export function BrandingEditor() {
     }
   }
 
-  function useLibraryImage(dataUri: string, type: "sidebar" | "background") {
-    if (type === "sidebar") {
-      updateBranding({ sidebar_picture: dataUri });
+  function handleLibrarySelect(entry: ImageLibraryEntry) {
+    if (entry.image_type === "sidebar") {
+      updateBranding({ sidebar_picture: entry.public_url });
     } else {
-      updateBranding({ background_picture: dataUri });
+      updateBranding({ background_picture: entry.public_url });
     }
-    setShowLibrary(false);
   }
 
-  // Group library images: seamless pairs first, then standalone
-  const seamlessPairs = (() => {
-    const map = new Map<string, { sidebar?: (typeof imageLibrary)[0]; background?: (typeof imageLibrary)[0] }>();
-    for (const img of imageLibrary) {
-      if (img.seamlessId && (img.type === "sidebar" || img.type === "background")) {
-        const pair = map.get(img.seamlessId) ?? {};
-        if (img.type === "sidebar") pair.sidebar = img;
-        else pair.background = img;
-        map.set(img.seamlessId, pair);
-      }
-    }
-    return [...map.entries()].map(([id, pair]) => ({ id, ...pair }));
-  })();
-  const pairedIds = new Set(imageLibrary.filter((i) => i.seamlessId).map((i) => i.id));
-  const sidebarImages = imageLibrary.filter((i) => i.type === "sidebar" && !i.seamlessId);
-  const backgroundImages = imageLibrary.filter((i) => i.type === "background" && !i.seamlessId);
+  function handleLibraryPair(
+    sidebar: ImageLibraryEntry,
+    background: ImageLibraryEntry,
+  ) {
+    updateBranding({
+      sidebar_picture: sidebar.public_url,
+      background_picture: background.public_url,
+    });
+  }
 
   return (
     <div className="space-y-4">
@@ -622,6 +773,25 @@ export function BrandingEditor() {
                     {analyzing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Analyze"}
                   </Button>
                 </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={extractMechanicalPalette}
+                    disabled={extractingPalette || !brandUrl.trim()}
+                    className="flex items-center gap-1.5 rounded border border-emerald-700/50 bg-emerald-950/30 px-2 py-1 text-[10px] text-emerald-300 hover:border-emerald-500 hover:text-emerald-200 disabled:opacity-40"
+                    title="Reads the homepage HTML for <meta name='theme-color'> or --primary/--brand CSS variables. Zero AI cost."
+                  >
+                    {extractingPalette ? (
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                    ) : (
+                      <Palette className="h-3 w-3" />
+                    )}
+                    Extract palette from website (free)
+                  </button>
+                  {paletteMessage && (
+                    <span className="text-[10px] text-slate-500">{paletteMessage}</span>
+                  )}
+                </div>
                 <label className={`flex cursor-pointer items-center gap-1.5 text-[10px] text-slate-500 hover:text-slate-300 ${analyzing ? "pointer-events-none opacity-40" : ""}`}>
                   <Wand2 className="h-3 w-3" />
                   or drop a brand/restaurant photo
@@ -647,6 +817,18 @@ export function BrandingEditor() {
           {/* AI Generate Section */}
           <div className="rounded-lg border border-slate-700 bg-slate-800/50 p-3 space-y-2.5">
             <Label className="text-xs text-slate-400">AI Branding Generator</Label>
+            <TemplateSelector
+              surface="background"
+              value={backgroundTemplate}
+              onChange={setBackgroundTemplate}
+              title="Background template"
+            />
+            <TemplateSelector
+              surface="sidebar"
+              value={sidebarTemplate}
+              onChange={setSidebarTemplate}
+              title="Sidebar template"
+            />
             <Input
               value={styleHints}
               onChange={(e) => setStyleHints(e.target.value)}
@@ -871,139 +1053,13 @@ export function BrandingEditor() {
             </div>
           </div>
 
-          {/* Image Library */}
-          {imageLibrary.filter((i) => i.type !== "item").length > 0 && (
-            <div className="space-y-2">
-              <button
-                onClick={() => setShowLibrary(!showLibrary)}
-                className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-200"
-              >
-                <Library className="h-3.5 w-3.5" />
-                Image Library ({seamlessPairs.length} seamless · {sidebarImages.length + backgroundImages.length} standalone)
-              </button>
-
-              {showLibrary && (
-                <div className="space-y-3 rounded-lg border border-slate-700 bg-slate-800/50 p-3">
-                  {/* Seamless pairs */}
-                  {seamlessPairs.length > 0 && (
-                    <div className="space-y-1.5">
-                      <Label className="text-[10px] text-slate-500">Seamless Pairs ({seamlessPairs.length})</Label>
-                      <div className="flex flex-wrap gap-3">
-                        {seamlessPairs.map((pair) => (
-                          <div key={pair.id} className="group relative flex gap-0.5 rounded border border-amber-700/40 bg-amber-950/20 p-1 hover:border-amber-500/60">
-                            {/* Sidebar thumbnail */}
-                            {pair.sidebar && (
-                              <div className="relative overflow-hidden rounded">
-                                <img
-                                  src={pair.sidebar.dataUri}
-                                  alt="Sidebar"
-                                  className="h-20 w-auto cursor-pointer"
-                                  title="Click to use sidebar"
-                                  onClick={() => useLibraryImage(pair.sidebar!.dataUri, "sidebar")}
-                                />
-                              </div>
-                            )}
-                            {/* Background thumbnail */}
-                            {pair.background && (
-                              <div className="relative overflow-hidden rounded">
-                                <img
-                                  src={pair.background.dataUri}
-                                  alt="Background"
-                                  className="h-20 w-auto cursor-pointer"
-                                  title="Click to use background"
-                                  onClick={() => useLibraryImage(pair.background!.dataUri, "background")}
-                                />
-                              </div>
-                            )}
-                            {/* Apply both */}
-                            <button
-                              onClick={() => {
-                                if (pair.sidebar) useLibraryImage(pair.sidebar.dataUri, "sidebar");
-                                if (pair.background) useLibraryImage(pair.background.dataUri, "background");
-                              }}
-                              className="absolute bottom-1 left-1/2 -translate-x-1/2 hidden rounded bg-amber-600/90 px-2 py-0.5 text-[9px] font-semibold text-white group-hover:block"
-                            >
-                              Use Both
-                            </button>
-                            {/* Delete pair */}
-                            <button
-                              onClick={() => {
-                                if (pair.sidebar) deleteGeneratedImage(pair.sidebar.id);
-                                if (pair.background) deleteGeneratedImage(pair.background.id);
-                              }}
-                              className="absolute right-0.5 top-0.5 hidden rounded bg-black/70 p-0.5 text-red-400 hover:text-red-300 group-hover:block"
-                            >
-                              <Trash2 className="h-2.5 w-2.5" />
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Standalone sidebars */}
-                  {sidebarImages.length > 0 && (
-                    <div className="space-y-1.5">
-                      <Label className="text-[10px] text-slate-500">Sidebars ({sidebarImages.length})</Label>
-                      <div className="flex flex-wrap gap-2">
-                        {sidebarImages.map((img, i) => (
-                          <div key={img.id} className="group relative overflow-hidden rounded border border-slate-700 hover:border-blue-500/50">
-                            <img
-                              src={img.dataUri}
-                              alt=""
-                              className="h-20 w-auto cursor-pointer"
-                              onClick={() => useLibraryImage(img.dataUri, "sidebar")}
-                              title="Click to use · double-click to view"
-                              onDoubleClick={() => {
-                                setLightbox(sidebarImages.map((s) => ({ src: s.dataUri, name: "Sidebar" })));
-                                setLightboxIdx(i);
-                              }}
-                            />
-                            <button
-                              onClick={() => deleteGeneratedImage(img.id)}
-                              className="absolute right-0.5 top-0.5 hidden rounded bg-black/70 p-0.5 text-red-400 hover:text-red-300 group-hover:block"
-                            >
-                              <Trash2 className="h-2.5 w-2.5" />
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Standalone backgrounds */}
-                  {backgroundImages.length > 0 && (
-                    <div className="space-y-1.5">
-                      <Label className="text-[10px] text-slate-500">Backgrounds ({backgroundImages.length})</Label>
-                      <div className="flex flex-wrap gap-2">
-                        {backgroundImages.map((img, i) => (
-                          <div key={img.id} className="group relative overflow-hidden rounded border border-slate-700 hover:border-purple-500/50">
-                            <img
-                              src={img.dataUri}
-                              alt=""
-                              className="h-16 w-auto cursor-pointer"
-                              onClick={() => useLibraryImage(img.dataUri, "background")}
-                              title="Click to use · double-click to view"
-                              onDoubleClick={() => {
-                                setLightbox(backgroundImages.map((b) => ({ src: b.dataUri, name: "Background" })));
-                                setLightboxIdx(i);
-                              }}
-                            />
-                            <button
-                              onClick={() => deleteGeneratedImage(img.id)}
-                              className="absolute right-0.5 top-0.5 hidden rounded bg-black/70 p-0.5 text-red-400 hover:text-red-300 group-hover:block"
-                            >
-                              <Trash2 className="h-2.5 w-2.5" />
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
+          <LibraryPicker
+            intent="background"
+            onSelect={handleLibrarySelect}
+            onSelectPair={handleLibraryPair}
+            title="Shared Image Library"
+            thumbnailClass="h-20 w-auto"
+          />
 
           {/* Mini POS Preview */}
           <div className="space-y-2">

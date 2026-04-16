@@ -13,6 +13,7 @@ async function generateViaRecraft(
   restaurantType?: string,
   styleHints?: string,
   recraftStyle: "vector_illustration" | "digital_illustration" = "vector_illustration",
+  templateId?: string,
 ): Promise<string> {
   const falKey = process.env.FAL_KEY;
   if (!falKey) throw new Error("FAL_KEY not set");
@@ -22,10 +23,14 @@ async function generateViaRecraft(
   // illustration territory instead of clean icon output.
   const category = groupName ? ` ${groupName.toLowerCase()}` : "";
   const extra = styleHints ? `, ${styleHints}` : "";
+  const templateSuffix =
+    templateId === "recraft-flat-sticker"
+      ? ", flat sticker style, thick white outline, bold saturated colors"
+      : "";
   const prompt =
     `${itemName}${category}, vector illustration, clean bold shapes, ` +
     `vivid colors, centered composition, transparent background, ` +
-    `no text, no labels${extra}`;
+    `no text, no labels${extra}${templateSuffix}`;
 
   // suppress unused warning — restaurantType reserved for future prompt use
   void restaurantType;
@@ -60,6 +65,56 @@ async function generateViaRecraft(
   const arrayBuffer = await imgRes.arrayBuffer();
   const base64 = Buffer.from(arrayBuffer).toString("base64");
   const contentType = imgRes.headers.get("content-type") || "image/png";
+  return `data:${contentType};base64,${base64}`;
+}
+
+// ─── fal.ai — FLUX Schnell (fast photoreal food on clean background) ────────
+
+async function generateViaFluxSchnell(
+  itemName: string,
+  groupName?: string,
+  restaurantType?: string,
+  styleHints?: string,
+): Promise<string> {
+  const falKey = process.env.FAL_KEY;
+  if (!falKey) throw new Error("FAL_KEY not set");
+
+  const category = groupName ? ` (${groupName.toLowerCase()})` : "";
+  const cuisine = restaurantType ? `, ${restaurantType.toLowerCase()} cuisine` : "";
+  const extra = styleHints ? `, ${styleHints}` : "";
+  const prompt =
+    `${itemName}${category}${cuisine}, photorealistic food photo, clean white background, ` +
+    `centered composition, appetizing, professional food photography lighting${extra}`;
+
+  const res = await fetch("https://fal.run/fal-ai/flux/schnell", {
+    method: "POST",
+    headers: {
+      Authorization: `Key ${falKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      prompt,
+      image_size: { width: 512, height: 512 },
+      num_inference_steps: 4,
+      num_images: 1,
+    }),
+    signal: AbortSignal.timeout(30000),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`FLUX Schnell HTTP ${res.status}: ${text.slice(0, 200)}`);
+  }
+
+  const data = (await res.json()) as { images?: { url: string }[] };
+  const imageUrl = data.images?.[0]?.url;
+  if (!imageUrl) throw new Error("No image URL in FLUX Schnell response");
+
+  const imgRes = await fetch(imageUrl, { signal: AbortSignal.timeout(15000) });
+  if (!imgRes.ok) throw new Error(`Image download failed: HTTP ${imgRes.status}`);
+  const arrayBuffer = await imgRes.arrayBuffer();
+  const base64 = Buffer.from(arrayBuffer).toString("base64");
+  const contentType = imgRes.headers.get("content-type") || "image/jpeg";
   return `data:${contentType};base64,${base64}`;
 }
 
@@ -117,13 +172,14 @@ Return ONLY the SVG code, no explanation.`,
 
 export async function POST(request: Request) {
   try {
-    const { itemName, groupName, restaurantType, styleHints, recraftStyle } =
+    const { itemName, groupName, restaurantType, styleHints, recraftStyle, templateId } =
       (await request.json()) as {
         itemName: string;
         groupName?: string;
         restaurantType?: string;
         styleHints?: string;
         recraftStyle?: "vector_illustration" | "digital_illustration";
+        templateId?: string;
       };
 
     if (!itemName) {
@@ -134,9 +190,50 @@ export async function POST(request: Request) {
     const foodCategory = extractFoodCategory(groupName);
     const cuisineType = restaurantType?.toLowerCase() || "general";
 
+    // Template-driven Recraft style override. Existing `recraftStyle` field
+    // continues to work as a fallback for callers that haven't adopted templates.
+    const resolvedRecraftStyle: "vector_illustration" | "digital_illustration" =
+      templateId === "recraft-digital"
+        ? "digital_illustration"
+        : templateId === "recraft-vector" || templateId === "recraft-flat-sticker"
+        ? "vector_illustration"
+        : recraftStyle ?? "vector_illustration";
+
+    // `flux-schnell-photo` template uses FLUX Schnell for photoreal food icons.
+    if (templateId === "flux-schnell-photo") {
+      try {
+        const dataUri = await generateViaFluxSchnell(itemName, groupName, restaurantType, styleHints);
+        return Response.json({
+          dataUri,
+          itemName,
+          source: "flux-schnell",
+          conceptTags,
+          foodCategory,
+          cuisineType,
+          generatedFor: undefined,
+        });
+      } catch (err) {
+        console.warn("FLUX Schnell failed, falling back to Recraft:", (err as Error).message);
+      }
+    }
+
+    // `haiku-svg` template skips Recraft entirely and jumps to Claude SVG path.
+    if (templateId === "haiku-svg") {
+      const svg = await generateViaClaude(itemName, groupName, restaurantType, styleHints);
+      return Response.json({
+        svg,
+        itemName,
+        source: "claude",
+        conceptTags,
+        foodCategory,
+        cuisineType,
+        generatedFor: undefined,
+      });
+    }
+
     // Try Recraft V3 first, fall back to Claude SVG
     try {
-      const dataUri = await generateViaRecraft(itemName, groupName, restaurantType, styleHints, recraftStyle);
+      const dataUri = await generateViaRecraft(itemName, groupName, restaurantType, styleHints, resolvedRecraftStyle, templateId);
       return Response.json({
         dataUri,
         itemName,
