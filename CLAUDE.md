@@ -56,14 +56,13 @@ Data flows through Zustand store:
 - **Color palette:** same route, `type: "palette"` — returns `{ background, buttons_background_color, buttons_font_color }`
 - Images stored as data URIs in Zustand `imageLibrary`; auto-assign matches by item name
 
-### Deploy Agent (`agent/deploy_agent.py`)
-- Runs as launchd service: `com.valuesystems.demo-builder-agent`
-- Polls Supabase `demo_builder.sessions` for `deploy_status = "queued"` every 5s via REST API
-- Executes SQL via `mysql.connector` against MariaDB deploy target
-- Pushes images via SCP: data URIs decoded via `base64.b64decode()`, URLs via `requests.get()`
-- POS image dirs: `C:\Program Files\Pecan Solutions\Pecan POS\images\{Food,Background,Sidebar}\`
-- Restarts POS via PsExec (session 1, elevated, `--no-sandbox`) after deploy
-- Agent logs: `~/Library/Logs/demo-builder-agent.{log,err}`
+### Agent files (`agent/`)
+
+**`deploy_agent.py`** — launchd daemon (`com.valuesystems.demo-builder-agent`). Always-on, always-stable. Polls `demo_builder.sessions` for `deploy_status='queued'` every 5s. On match: executes SQL via `mysql.connector`, pushes images via SCP (data URIs + URLs both handled), restarts POS via PsExec (session 1, elevated, `--no-sandbox`). No Anthropic calls, no batch logic. Logs: `~/Library/Logs/demo-builder-agent.{log,err}`.
+
+**`batch_pipeline.py`** — CLI-only, **never a daemon**. Subcommands: `run-staged` (one tick of discover→extract→modifier→branding→assemble), `retry-failed` (stub — not implemented), `dry-run` (watched run via `dryrun_staged.py` against `TRACKED_IDS`). Uses Anthropic Messages Batches API (Haiku 4.5) with prompt caching. Spends money — operator must invoke manually. Wave constants: `WAVE_MIN_SIZE=20`, `WAVE_MAX_SIZE=40`, `FORCE_WAVE_AFTER_SECONDS=1800`. See `agent/rebuild_batch.py` for bulk preflight+rebuild.
+
+**`pipeline_shared.py`** — shared primitives imported by both. Supabase REST client, env load, URL classifiers, HTML/curl fetchers, ld+json extractors, menu-URL discovery. No wave logic, no POS/SSH/MariaDB.
 
 ### SQL Generation (`lib/sql/deployer.ts`)
 - Always freshly generates SQL in `handleStageDeploy` — never uses stale pre-generated SQL
