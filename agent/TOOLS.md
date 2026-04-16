@@ -156,6 +156,39 @@ Same stripping applied to `raw_text` in `advance_stage_extract()`.
 
 ---
 
+## analyze_failures.py
+
+**Path:** `agent/analyze_failures.py`
+**Purpose:** Categorize failed `batch_queue` rows without re-running AI, so failures drive root-cause fixes (upstream URL pruning, code change) instead of blanket retries.
+
+**What it achieves:** Groups failed rows by error pattern + URL class + restaurant-type distribution. Emits a report + optional CSV dump. Never calls Anthropic.
+
+**Inputs:** `SUPABASE_URL`, `SUPABASE_KEY` from `agent/.env`.
+
+**Flags:** `--csv <path>`, `--sample N` (show N URLs per category), `--status <name>` (default: failed).
+
+**Constraints & iteration history:**
+- Core principle from 2026-04-15: failures get analysis, not auto-retry. See `memory/feedback_failures_never_auto_retry.md`.
+- Error categorization is regex-based over `batch_queue.error`. Add new buckets as new failure modes appear.
+
+---
+
+## test_extract.py
+
+**Path:** `agent/test_extract.py`
+**Purpose:** Single-query extraction tester for iterating on fetch logic and prompts without submitting a batch.
+
+**What it achieves:** Runs the full fetch → Haiku extract pipeline against one URL (or batch_queue row id, or a file of URLs) and prints item count + first few items. ~20s per URL vs. ~10 min batch roundtrip.
+
+**Inputs:** `SUPABASE_URL`, `SUPABASE_KEY`, `ANTHROPIC_API_KEY`.
+
+**Flags:** `<url>`, `--row <id>`, `--urls-file <path>`.
+
+**Constraints & iteration history:**
+- Imports from `batch_pipeline.py` / `pipeline_shared.py` — changes to the prod pipeline are automatically tested. See `memory/feedback_test_single_query_before_batch.md`.
+
+---
+
 ## rebuild_batch.py
 
 **Path:** `agent/rebuild_batch.py`
