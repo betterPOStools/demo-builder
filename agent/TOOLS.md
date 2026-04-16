@@ -156,6 +156,23 @@ Same stripping applied to `raw_text` in `advance_stage_extract()`.
 
 ---
 
+## fix_contrast.py
+
+**Path:** `agent/fix_contrast.py`
+**Purpose:** Retroactively repair WCAG-AA contrast violations on already-deployed demo snapshots and Supabase `sessions.generated_sql` rows.
+
+**What it achieves:** For each SQL file in `~/Projects/demo-DBs/` and each session in Supabase, parses the `ButtonsBackgroundColor` + `ButtonsFontColor` UPDATEs, computes the WCAG contrast ratio, and rewrites the font colour to `#FFFFFF` or `#000000` (whichever has the higher ratio) when the existing combo is below 4.5. Idempotent — no-ops on already-fixed rows.
+
+**Inputs:** `NEXT_PUBLIC_SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` from `../.env.local`. Snapshot dir: `~/Projects/demo-DBs/`.
+
+**Flags:** `--yes` (commit), `--snapshots-only`, `--sessions-only`. Dry-run is the default.
+
+**Constraints & iteration history:**
+- Original pipeline could produce AI-generated palettes like white-on-grey that failed WCAG AA — see `memory/feedback_wcag_button_contrast.md`. The root fix now lives in the pipeline (`lib/presets/typePalettes.ts` hardcoded contrast-safe pairs + the extractor clamps at AA). This script cleans up the pre-fix corpus.
+- SQL rewrite is purely regex-based — no parsing of the full dump. Safe because the two target UPDATE lines are predictable.
+
+---
+
 ## retag_library.py
 
 **Path:** `agent/retag_library.py`
