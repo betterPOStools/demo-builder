@@ -156,6 +156,41 @@ Same stripping applied to `raw_text` in `advance_stage_extract()`.
 
 ---
 
+## rebuild_batch.py
+
+**Path:** `agent/rebuild_batch.py`
+**Purpose:** Single-shot rebuild CLI (PR1 scope: preflight-only dry-run). Classifies every `batch_queue` row mechanically before any AI call — writes `preflight JSONB` + tags with `rebuild_run_id`, counts buckets, projects AI cost.
+
+**What it achieves:** Replaces the wave-based staged pipeline in `deploy_agent.py` for bulk rebuilds. PR1 populates preflight verdicts + bucket summary. PR3 will add stage batch submission (one Anthropic batch per stage-dependency boundary). Non-dry-run invocations currently hard-error.
+
+**Inputs:** `SUPABASE_URL`, `SUPABASE_KEY` from `agent/.env`. Requires migration `010_preflight_column.sql` applied.
+
+**Flags:** `--run-id <uuid>` (default: new uuid), `--limit N`, `--yes` (rejected in PR1).
+
+**Constraints & iteration history:**
+- PR1 is read-only classification. No status mutation, no AI spend.
+- Mechanical verdict shape covers url_class, fetch_status, menu_url_candidate, ldjson_items, branding_tokens, image_menu_urls, content_gate_verdict, ai_needed[].
+- See `agent/REFACTOR_PLAN.md` for the three-PR sequence.
+
+---
+
+## rebuild_all.py
+
+**Path:** `agent/rebuild_all.py`
+**Purpose:** Destructive full-corpus reset: flips every `batch_queue` row back to `queued` and clears every derived field so the agent reprocesses from scratch through the current pipeline.
+
+**What it achieves:** Fresh cost data + fresh output quality on the whole corpus. Required when pipeline improvements (menu-index follower, image-menu, WCAG, zero-price flip) need to be applied to already-shipped rows.
+
+**Inputs:** same env as `deploy_agent.py`. `~/Projects/demo-DBs/` optional snapshot dir.
+
+**Flags:** `--yes` (commit — without it, prints counts only), `--exclude-done` (preserve sessions.deploy_status='done' rows).
+
+**Constraints & iteration history:**
+- Orphans `sessions` rows linked via `session_id` — do not run mid-demo. See `memory/feedback_rebuild_preserves_existing_sessions.md`.
+- pt_record_id prefix caveat: batch_queue stores bare ChIJ..., sessions prepend `db_`. `--exclude-done` joins with prepend.
+
+---
+
 ## fix_contrast.py
 
 **Path:** `agent/fix_contrast.py`
