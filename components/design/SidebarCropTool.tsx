@@ -154,7 +154,7 @@ export function SidebarCropTool({ src, onCrop, onCancel }: Props) {
           </div>
         </div>
         <div
-          className="relative mx-auto select-none"
+          className="relative mx-auto touch-none select-none overscroll-contain"
           style={{ width: viewW || 200, height: viewH || 200 }}
         >
           <img
@@ -197,12 +197,12 @@ export function SidebarCropTool({ src, onCrop, onCancel }: Props) {
                 }}
               />
               <div
-                className="absolute cursor-move border-2 border-white shadow-[0_0_0_1px_rgba(0,0,0,0.6)]"
+                className="absolute cursor-move touch-none border-2 border-white shadow-[0_0_0_1px_rgba(0,0,0,0.6)]"
                 style={{ left: r.x, top: r.y, width: r.w, height: r.h }}
                 onPointerDown={(e) => beginDrag("pan", e)}
               >
                 <div
-                  className="absolute -bottom-1.5 -right-1.5 h-3.5 w-3.5 cursor-nwse-resize rounded-sm border border-slate-900 bg-white"
+                  className="absolute -bottom-1.5 -right-1.5 h-5 w-5 cursor-nwse-resize touch-none rounded-sm border border-slate-900 bg-white"
                   onPointerDown={(e) => beginDrag("resize", e)}
                 />
               </div>
