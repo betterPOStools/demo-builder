@@ -150,10 +150,6 @@ Cross-origin batch feed at `app/api/batch/feed/route.ts`. Used by NomadHQ BatchQ
 3. **Deeper Playwright waits** — ordering portals (Olo, Punchh) return nav chrome only; adding wait-for-selector could recover some.
 4. **Stuck-row detection** — add automatic reset of rows in `discovering`/`extracting` for >15 min (orphaned from killed agent).
 
-## Backlog / revisit later
-
-- **Load from Tablet transport** (2026-04-17): Shipped via Mac-side relay (a2) — `deploy_agent.py` exposes an HTTP snapshot endpoint, browser fetches via Tailscale to the Mac. Revisit when: (i) we want tablet snapshots to work when the Mac is off, or (ii) the daemon HTTP path becomes a bottleneck. Alternative to re-evaluate is (a1) a tablet-side HTTPS server via `tailscale serve` — zero Mac dependency but adds a new service to maintain on the tablet.
-
 ## Live URLs / infra
 
 - **App:** https://demo-builder-seven.vercel.app

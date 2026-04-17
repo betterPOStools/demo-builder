@@ -140,40 +140,6 @@ Same stripping applied to `raw_text` in `advance_stage_extract()`.
 
 ---
 
-## snapshot_server.py
-
-**Path:** `agent/snapshot_server.py`
-**Purpose:** Exposes read-only POS MariaDB snapshots over the tailnet so demo-builder browsers can hydrate the Design step from the tablet's current state ("Load from Tablet" / in-place edit flow).
-
-**What it achieves:** A threaded HTTP server started by `deploy_agent.main()` as a daemon thread. Binds `0.0.0.0:5199`, reachable at `http://aarons-imac-1.tail0f324a.ts.net:5199/` from any tailnet device. Endpoints: `/healthz`, `/snapshot` (SELECTs groups/items/branding via mysql.connector), `/image` (streams image bytes via SSH `type`).
-
-**Inputs / env vars:**
-
-| Var | Required | Default | Purpose |
-|-----|----------|---------|---------|
-| `SNAPSHOT_PORT` | — | `5199` | Listen port. |
-
-Per-request query params (all optional, default to daemon's DB config):
-`?host=&port=&db=&user=&password=` on `/snapshot`, `?host=&user=&path=` on `/image`.
-
-**Constraints & iteration history:**
-
-- **Auth = Tailscale ACL only.** No app-level auth on the endpoint. Tailnet membership gates access — server refuses to serve outside the tailnet because Tailscale is the only routable path. A future iteration could add a shared-secret header if we open a non-tailnet path.
-- **Mixed-content gate for Vercel prod** — demo-builder browsers on `https://*.vercel.app` cannot fetch `http://…:5199` directly (browser blocks). To unblock, run once on the Mac: `tailscale serve --bg https / http://127.0.0.1:5199` — Tailscale issues a real Let's Encrypt cert for `*.tail0f324a.ts.net`. Local dev (localhost:3002) has no HTTPS requirement so works without this setup.
-- **Why not extend `pos_upload_server.py`?** That script referenced in the suite CLAUDE.md is not actually running on the tablet — `netstat` showed only SSH/MariaDB/SMB listening. Shipping a new tablet-side service would have required install + auto-start + cert plumbing. This Mac-side variant reuses the daemon's existing SSH credentials and launchd lifecycle.
-- **Why not inline images in `/snapshot`?** 40 items × 100KB base64 = 4MB JSON payload. Separate `/image` endpoint keeps the JSON small and lets the browser lazy-load + cache images naturally.
-- **mysql.connector from Mac, not SSH'd into tablet** — the Mac reaches MariaDB 3306 over Tailscale directly, so queries run in-process here. SSH is only needed for image file reads (they live on the tablet filesystem, not in MariaDB).
-- **Image path format** — menuitems/menugroups/storesettings store Windows-style relative paths (`Food\PastramiReuben.png`, `Background\generated_bg.png`). The handler prefixes `C:\Program Files\Pecan Solutions\Pecan POS\images\` and accepts both `/` and `\` from the client.
-- **Restaurant name is NOT in storesettings** (confirmed on pecandemodb 2026-04-17). The snapshot falls back to the database name. The frontend should prompt the user to confirm/edit it after hydration.
-
-**Known issues:**
-
-- Modifier templates are not included in the snapshot yet. The schema (`menumodifiertemplates` + sections + items) is straightforward; add when the editor needs them.
-- No pagination. Full menu dump every call. Fine for ≤100 items; revisit if someone loads a 1000-item catalog.
-- No `tailscale serve` glue automation. One-time manual step; document-only.
-
----
-
 ## deploy_agent_local.py
 
 **Path:** `agent/deploy_agent_local.py`  
