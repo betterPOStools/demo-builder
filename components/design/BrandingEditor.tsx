@@ -10,7 +10,9 @@ import {
   X,
   Wand2,
   ScanSearch,
+  Crop,
 } from "lucide-react";
+import { SidebarCropTool } from "@/components/design/SidebarCropTool";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
@@ -241,6 +243,10 @@ export function BrandingEditor() {
   const [generating, setGenerating] = useState(false);
   const [genProgress, setGenProgress] = useState("");
   const [preview, setPreview] = useState<BrandingPreview | null>(null);
+  const [cropState, setCropState] = useState<{
+    src: string;
+    apply: (dataUri: string) => void;
+  } | null>(null);
   const [lightbox, setLightbox] = useState<LightboxImage[] | null>(null);
   const [lightboxIdx, setLightboxIdx] = useState(0);
 
@@ -948,14 +954,30 @@ export function BrandingEditor() {
               <div className="flex gap-3">
                 {preview.sidebarPng && (
                   <div className="space-y-1">
-                    <div className="flex items-center justify-between">
+                    <div className="flex items-center justify-between gap-2">
                       <Label className="text-[10px] text-slate-400">Sidebar</Label>
-                      <button
-                        onClick={() => acceptPartial("sidebar")}
-                        className="text-[10px] text-green-400 hover:text-green-300"
-                      >
-                        Apply
-                      </button>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() =>
+                            setCropState({
+                              src: preview.sidebarPng!,
+                              apply: (d) =>
+                                setPreview((p) => (p ? { ...p, sidebarPng: d } : p)),
+                            })
+                          }
+                          className="flex items-center gap-1 text-[10px] text-blue-400 hover:text-blue-300"
+                          title="Crop to 360×696"
+                        >
+                          <Crop className="h-3 w-3" />
+                          Crop
+                        </button>
+                        <button
+                          onClick={() => acceptPartial("sidebar")}
+                          className="text-[10px] text-green-400 hover:text-green-300"
+                        >
+                          Apply
+                        </button>
+                      </div>
                     </div>
                     <div className="rounded bg-slate-900 p-1">
                       <img src={preview.sidebarPng} alt="" className="h-32 rounded border border-slate-700" />
@@ -1019,6 +1041,19 @@ export function BrandingEditor() {
                   <span className="flex-1 truncate text-[10px] text-slate-500">
                     {branding.sidebar_picture.startsWith("data:") ? "Generated" : "URL"}
                   </span>
+                  <button
+                    onClick={() =>
+                      setCropState({
+                        src: branding.sidebar_picture!,
+                        apply: (d) => updateBranding({ sidebar_picture: d }),
+                      })
+                    }
+                    className="flex items-center gap-0.5 text-[10px] text-blue-400 hover:text-blue-300"
+                    title="Crop to 360×696"
+                  >
+                    <Crop className="h-3 w-3" />
+                    Crop
+                  </button>
                   <button onClick={() => updateBranding({ sidebar_picture: null })} className="text-[10px] text-slate-500 hover:text-red-400">
                     Clear
                   </button>
@@ -1143,6 +1178,16 @@ export function BrandingEditor() {
           index={lightboxIdx}
           onClose={() => setLightbox(null)}
           onNavigate={setLightboxIdx}
+        />
+      )}
+      {cropState && (
+        <SidebarCropTool
+          src={cropState.src}
+          onCrop={(d) => {
+            cropState.apply(d);
+            setCropState(null);
+          }}
+          onCancel={() => setCropState(null)}
         />
       )}
     </div>
