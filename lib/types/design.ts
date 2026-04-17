@@ -4,7 +4,7 @@
 export type CategoryName = "Food" | "Beverages" | "Bar";
 
 export interface DesignOrigin {
-  type: "fresh" | "menu_import" | "profile_import" | "tablet";
+  type: "fresh" | "menu_import" | "profile_import";
   importedAt?: string;
 }
 
