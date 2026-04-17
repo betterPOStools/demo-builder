@@ -22,7 +22,7 @@ export interface BrandingState {
 
 export interface GeneratedImage {
   id: string;
-  type: "sidebar" | "background" | "item";
+  type: "sidebar" | "background" | "item" | "logo";
   dataUri: string; // PNG data URI
   createdAt: string;
   restaurantName?: string;

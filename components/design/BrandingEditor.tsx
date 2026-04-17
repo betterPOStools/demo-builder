@@ -459,6 +459,87 @@ export function BrandingEditor() {
     }
   }
 
+  async function generateOne(type: "sidebar" | "background") {
+    setGenerating(true);
+    setGenProgress(`Generating ${type}...`);
+    try {
+      const imageryKeywords = (brandTokens?.imagery_keywords as string[] | undefined) ?? [];
+      const textureWords = (brandTokens?.textureWords as string[] | undefined) ?? [];
+      const lightingDesc = (brandTokens?.lightingDescription as string | undefined) ?? "";
+      const keywords = [
+        ...imageryKeywords.slice(0, 3),
+        (brandTokens?.industry as string | undefined) ?? restaurantType ?? "",
+      ].filter(Boolean);
+      const basePrompt = brandTokens
+        ? [lightingDesc, ...imageryKeywords.slice(0, 2), ...textureWords.slice(0, 2)].filter(Boolean).join(". ")
+        : [restaurantName, restaurantType, styleHints].filter(Boolean).join(", ") +
+          (type === "sidebar" ? ", atmospheric cinematic vertical" : ", atmospheric cinematic background");
+      const hasQuoteText = type === "sidebar" && /"[^"]+"/.test(styleHints);
+      const quoteText = styleHints.match(/"([^"]+)"/)?.[1];
+
+      const body: Record<string, unknown> = {
+        keywords,
+        assetType: type,
+        brandTokens,
+        width: type === "sidebar" ? 360 : 1024,
+        height: type === "sidebar" ? 696 : 716,
+      };
+      if (type === "sidebar") {
+        body.sidebarPrompt = basePrompt;
+        body.hasQuoteText = hasQuoteText;
+        if (quoteText) body.quoteText = quoteText;
+      } else {
+        body.backgroundPrompt = basePrompt;
+        body.hasQuoteText = false;
+      }
+
+      const data = await fetch("/api/fetch-photo", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }).then((r) => r.json());
+
+      const uri = data.results?.[0]?.dataUri as string | undefined;
+      if (!uri) throw new Error(data.results?.[0]?.error || "No image returned");
+      const ts = new Date().toISOString();
+      addGeneratedImage({
+        id: generateId(),
+        type,
+        dataUri: uri,
+        createdAt: ts,
+        restaurantName: restaurantName || undefined,
+      });
+      setPreview((prev) => ({ ...(prev ?? {}), [type === "sidebar" ? "sidebarPng" : "backgroundPng"]: uri }));
+    } catch (err) {
+      console.error(`${type} generation failed:`, err);
+    } finally {
+      setGenerating(false);
+      setGenProgress("");
+    }
+  }
+
+  async function uploadToLibrary(
+    e: React.ChangeEvent<HTMLInputElement>,
+    type: "sidebar" | "background" | "logo",
+  ) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    const dataUri = await new Promise<string>((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(r.result as string);
+      r.onerror = reject;
+      r.readAsDataURL(file);
+    });
+    addGeneratedImage({
+      id: generateId(),
+      type,
+      dataUri,
+      createdAt: new Date().toISOString(),
+      restaurantName: restaurantName || undefined,
+    });
+  }
+
   async function handleImageUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     e.target.value = "";
@@ -536,6 +617,7 @@ export function BrandingEditor() {
   const pairedIds = new Set(imageLibrary.filter((i) => i.seamlessId).map((i) => i.id));
   const sidebarImages = imageLibrary.filter((i) => i.type === "sidebar" && !i.seamlessId);
   const backgroundImages = imageLibrary.filter((i) => i.type === "background" && !i.seamlessId);
+  const logoImages = imageLibrary.filter((i) => i.type === "logo");
 
   return (
     <div className="space-y-4">
@@ -700,6 +782,55 @@ export function BrandingEditor() {
             <p className="text-[10px] text-slate-600">
               Seamless: one image split across sidebar + background. Upload: use your own photo.
             </p>
+
+            <div className="flex gap-2 pt-1.5 border-t border-slate-700/60">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => generateOne("sidebar")}
+                disabled={generating}
+                className="flex-1 gap-1.5 text-xs"
+                title="Regenerate just the sidebar"
+              >
+                <Wand2 className="h-3.5 w-3.5 text-blue-400" />
+                Sidebar only
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => generateOne("background")}
+                disabled={generating}
+                className="flex-1 gap-1.5 text-xs"
+                title="Regenerate just the background"
+              >
+                <Wand2 className="h-3.5 w-3.5 text-purple-400" />
+                Background only
+              </Button>
+            </div>
+
+            <div className="pt-1.5 border-t border-slate-700/60 space-y-1.5">
+              <Label className="text-[10px] text-slate-500">Upload from your device → Image Library</Label>
+              <div className="flex gap-2">
+                {(["sidebar", "background", "logo"] as const).map((t) => (
+                  <label
+                    key={t}
+                    className={`flex flex-1 cursor-pointer items-center justify-center gap-1 rounded-md border border-slate-600 bg-transparent px-2 py-1 text-[11px] font-medium text-slate-300 transition hover:border-slate-400 hover:text-white ${generating ? "pointer-events-none opacity-40" : ""}`}
+                  >
+                    <span className="capitalize">{t}</span>
+                    <input
+                      type="file"
+                      accept="image/*"
+                      className="hidden"
+                      onChange={(e) => uploadToLibrary(e, t)}
+                      disabled={generating}
+                    />
+                  </label>
+                ))}
+              </div>
+              <p className="text-[10px] text-slate-600">
+                Logos sit in the library for later use (apply manually as sidebar or item image).
+              </p>
+            </div>
           </div>
 
           {/* Preview of generated branding */}
@@ -914,7 +1045,7 @@ export function BrandingEditor() {
                 className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-200"
               >
                 <Library className="h-3.5 w-3.5" />
-                Image Library ({seamlessPairs.length} seamless · {sidebarImages.length + backgroundImages.length} standalone)
+                Image Library ({seamlessPairs.length} seamless · {sidebarImages.length + backgroundImages.length} standalone · {logoImages.length} logos)
               </button>
 
               {showLibrary && (
@@ -991,6 +1122,36 @@ export function BrandingEditor() {
                               title="Click to use · double-click to view"
                               onDoubleClick={() => {
                                 setLightbox(sidebarImages.map((s) => ({ src: s.dataUri, name: "Sidebar" })));
+                                setLightboxIdx(i);
+                              }}
+                            />
+                            <button
+                              onClick={() => deleteGeneratedImage(img.id)}
+                              className="absolute right-0.5 top-0.5 hidden rounded bg-black/70 p-0.5 text-red-400 hover:text-red-300 group-hover:block"
+                            >
+                              <Trash2 className="h-2.5 w-2.5" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Logos */}
+                  {logoImages.length > 0 && (
+                    <div className="space-y-1.5">
+                      <Label className="text-[10px] text-slate-500">Logos ({logoImages.length})</Label>
+                      <div className="flex flex-wrap gap-2">
+                        {logoImages.map((img, i) => (
+                          <div key={img.id} className="group relative overflow-hidden rounded border border-slate-700 bg-slate-900 hover:border-amber-500/50">
+                            <img
+                              src={img.dataUri}
+                              alt=""
+                              className="h-16 w-auto cursor-pointer object-contain"
+                              onClick={() => useLibraryImage(img.dataUri, "sidebar")}
+                              title="Click to apply as sidebar · double-click to view"
+                              onDoubleClick={() => {
+                                setLightbox(logoImages.map((l) => ({ src: l.dataUri, name: "Logo" })));
                                 setLightboxIdx(i);
                               }}
                             />
