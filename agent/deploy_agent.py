@@ -2226,6 +2226,18 @@ def main():
         print(f"  SSH: NOT available — image push and POS restart will be skipped")
     print()
 
+    try:
+        from snapshot_server import start_background as _start_snapshot_server
+        _start_snapshot_server(
+            default_db={
+                "host": DB_HOST, "port": DB_PORT, "database": DB_NAME,
+                "user": DB_USER, "password": DB_PASSWORD,
+            },
+            default_ssh_user=SSH_USER,
+        )
+    except Exception as e:
+        print(f"  Snapshot : failed to start ({e}) — /snapshot endpoint unavailable")
+
     consecutive_errors = 0
 
     use_staged = os.environ.get("USE_STAGED_PIPELINE", "1") == "1"
