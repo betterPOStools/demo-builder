@@ -14,6 +14,7 @@ respective daemons/CLIs.
 Extraction source: `deploy_agent.py` as of 2026-04-16 (lift-and-shift,
 no behavior change). See `agent/SEPARATION_AUDIT.md`.
 """
+from __future__ import annotations  # PEP 563: runs on /usr/bin/python3 (3.9)
 
 import json
 import os
@@ -72,6 +73,149 @@ def supabase_patch(table, match, data):
     url = f"{SUPABASE_URL}/rest/v1/{table}"
     r = requests.patch(url, headers=HEADERS, params=match, json=data, timeout=10)
     r.raise_for_status()
+
+# ---------------------------------------------------------------------------
+# Stage → column map (canonical; see REFACTOR_PLAN.md §2.5b)
+# ---------------------------------------------------------------------------
+#
+# `batch_id_col` is written by submit_batch and read by wait_and_drain; the
+# names come from migrations 004 (discover/extract/modifier/branding), 008
+# (pdf), 009 (image_menu).
+#
+# `result_col` is NON-UNIFORM on purpose: extract, pdf, and image_menu all
+# share `extraction_result` (pdf and image_menu are re-routes of extract),
+# while modifier and branding have their own columns. discover has no
+# per-row result (its output is new rows, not a column).
+#
+# Blind f"{stage}_result" would silently misname columns — always indirect
+# through STAGES[stage]["result_col"].
+
+StageName = str  # "discover" | "extract" | "modifier" | "branding" | "pdf" | "image_menu"
+
+STAGES: dict = {
+    "discover":   {"batch_id_col": "discover_batch_id",   "result_col": None},
+    "extract":    {"batch_id_col": "extract_batch_id",    "result_col": "extraction_result"},
+    "modifier":   {"batch_id_col": "modifier_batch_id",   "result_col": "modifier_result"},
+    "branding":   {"batch_id_col": "branding_batch_id",   "result_col": "branding_result"},
+    "pdf":        {"batch_id_col": "pdf_batch_id",        "result_col": "extraction_result"},
+    "image_menu": {"batch_id_col": "image_menu_batch_id", "result_col": "extraction_result"},
+}
+
+
+def _introspect_batch_queue_columns() -> set[str]:
+    """List column names on demo_builder.batch_queue via PostgREST OPTIONS.
+
+    PostgREST doesn't expose information_schema directly, but an empty GET
+    with `select=*&limit=0` returns the full column set in the response's
+    `Content-Range` header + first-row shape. We query with limit=1 and
+    read the keys off the row (or empty list) — if the table is empty we
+    fall back to a `select=*` with `Prefer: count=exact` and parse the
+    response headers. Keep it simple: use a tiny SQL RPC instead.
+    """
+    # Simplest reliable path: POST to /rest/v1/rpc/<fn> with a tiny SQL fn,
+    # but adding an RPC per introspection is overkill. Just GET one row.
+    url = f"{SUPABASE_URL}/rest/v1/batch_queue?limit=1&select=*"
+    r = requests.get(url, headers={**HEADERS, "Accept": "application/json"}, timeout=10)
+    r.raise_for_status()
+    rows = r.json()
+    if rows:
+        return set(rows[0].keys())
+    # Empty table: introspect via OpenAPI spec endpoint
+    spec_url = f"{SUPABASE_URL}/rest/v1/"
+    r2 = requests.get(spec_url, headers={**HEADERS, "Accept": "application/openapi+json"}, timeout=10)
+    r2.raise_for_status()
+    spec = r2.json()
+    props = (
+        spec.get("definitions", {})
+        .get("batch_queue", {})
+        .get("properties", {})
+    )
+    return set(props.keys())
+
+
+def log_event(
+    *,
+    batch_queue_id: str,
+    rebuild_run_id: str,
+    stage: str,
+    event_type: str,
+    batch_id: str | None = None,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
+    cache_creation_tokens: int | None = None,
+    cache_read_tokens: int | None = None,
+    cost_usd=None,  # numeric; supabase REST serializes str/float/Decimal
+    error_text: str | None = None,
+    review_reason: str | None = None,
+    http_status: int | None = None,
+) -> None:
+    """Single-row INSERT into demo_builder.batch_queue_events.
+
+    Never raises. Event-write failure must not mask the underlying
+    operation — the caller has already done the work. On any exception,
+    print a warning and swallow: status column remains the fallback.
+
+    See REFACTOR_PLAN.md §2.9 for event vocabulary.
+    """
+    payload = {
+        "batch_queue_id": batch_queue_id,
+        "rebuild_run_id": rebuild_run_id,
+        "stage": stage,
+        "event_type": event_type,
+    }
+    if batch_id is not None:
+        payload["batch_id"] = batch_id
+    if input_tokens is not None:
+        payload["input_tokens"] = int(input_tokens)
+    if output_tokens is not None:
+        payload["output_tokens"] = int(output_tokens)
+    if cache_creation_tokens is not None:
+        payload["cache_creation_tokens"] = int(cache_creation_tokens)
+    if cache_read_tokens is not None:
+        payload["cache_read_tokens"] = int(cache_read_tokens)
+    if cost_usd is not None:
+        payload["cost_usd"] = str(cost_usd)
+    if error_text is not None:
+        payload["error_text"] = error_text[:8000]  # guard against huge blobs
+    if review_reason is not None:
+        payload["review_reason"] = review_reason
+    if http_status is not None:
+        payload["http_status"] = int(http_status)
+
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/batch_queue_events"
+        requests.post(url, headers=HEADERS, json=payload, timeout=10).raise_for_status()
+    except Exception as e:
+        print(f"[log_event] WARN: event write failed ({event_type}/{stage} "
+              f"for row {batch_queue_id}): {e}", flush=True)
+
+
+def assert_schema() -> None:
+    """Fail-fast check that every column STAGES + PR3 requires exists on
+    `demo_builder.batch_queue`. Call this once at rebuild_batch.py startup.
+
+    Raises RuntimeError with a precise list of missing columns so migrations
+    can be identified by name.
+    """
+    required = {meta["batch_id_col"] for meta in STAGES.values()}
+    required |= {c for c in (m["result_col"] for m in STAGES.values()) if c}
+    required |= {
+        "active_batch_run_id",
+        "review_reason",
+        "rebuild_run_id",
+        "preflight",
+        "batch_submitted_at",
+        "last_polled_at",
+        "status",
+        "pt_record_id",
+    }
+    existing = _introspect_batch_queue_columns()
+    missing = sorted(required - existing)
+    if missing:
+        raise RuntimeError(
+            f"demo_builder.batch_queue is missing required columns: {missing}. "
+            "Apply migrations 004/008/009/010/012 via supabase/migrations/."
+        )
 
 # ---------------------------------------------------------------------------
 # Shared exception + timestamp util
