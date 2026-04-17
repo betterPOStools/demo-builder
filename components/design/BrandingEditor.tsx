@@ -25,7 +25,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { useStore } from "@/store";
-import type { SavedBrandAnalysis } from "@/store/designSlice";
+import type { SavedBrandAnalysis, GeneratedImage } from "@/store/designSlice";
 import { isLightColor, generateId } from "@/lib/utils";
 import { htmlToPng } from "@/lib/htmlToPng";
 import {
@@ -512,6 +512,44 @@ export function BrandingEditor() {
       setPreview((prev) => ({ ...(prev ?? {}), [type === "sidebar" ? "sidebarPng" : "backgroundPng"]: uri }));
     } catch (err) {
       console.error(`${type} generation failed:`, err);
+    } finally {
+      setGenerating(false);
+      setGenProgress("");
+    }
+  }
+
+  async function remixLogo(img: GeneratedImage) {
+    const promptText = window.prompt(
+      "Describe the remix style (e.g. 'clean vector, flat colors, brand palette'):",
+      "clean modern vector logo, flat colors, transparent background",
+    );
+    if (!promptText?.trim()) return;
+    setGenerating(true);
+    setGenProgress("Remixing logo...");
+    try {
+      const res = await fetch("/api/remix-logo", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          imageDataUri: img.dataUri,
+          prompt: promptText.trim(),
+          strength: 0.7,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.dataUri) {
+        throw new Error(data.error || `HTTP ${res.status}`);
+      }
+      addGeneratedImage({
+        id: generateId(),
+        type: "logo",
+        dataUri: data.dataUri,
+        createdAt: new Date().toISOString(),
+        restaurantName: restaurantName || undefined,
+      });
+    } catch (err) {
+      console.error("Remix failed:", err);
+      alert(`Remix failed: ${(err as Error).message}`);
     } finally {
       setGenerating(false);
       setGenProgress("");
@@ -1155,6 +1193,14 @@ export function BrandingEditor() {
                                 setLightboxIdx(i);
                               }}
                             />
+                            <button
+                              onClick={() => remixLogo(img)}
+                              disabled={generating}
+                              className="absolute bottom-0.5 left-0.5 hidden rounded bg-amber-600/90 px-1.5 py-0.5 text-[9px] font-semibold text-white hover:bg-amber-500 disabled:opacity-50 group-hover:block"
+                              title="Remix with AI (img2img)"
+                            >
+                              <Sparkles className="inline h-2.5 w-2.5" /> Remix
+                            </button>
                             <button
                               onClick={() => deleteGeneratedImage(img.id)}
                               className="absolute right-0.5 top-0.5 hidden rounded bg-black/70 p-0.5 text-red-400 hover:text-red-300 group-hover:block"
