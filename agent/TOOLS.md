@@ -3,9 +3,11 @@
 ## deploy_agent.py
 
 **Path:** `agent/deploy_agent.py`  
-**Purpose:** Polls Supabase for queued deployments and executes them: runs SQL against MariaDB, pushes images via SCP, and restarts the POS.
+**Purpose:** A single long-running daemon that does two things: (1) polls Supabase for queued deployments and executes them against MariaDB/POS, AND (2) polls `batch_queue` pools and submits Anthropic message batches to drain them. The name "deploy_agent" predates the batch role and is a misnomer today.
 
-**What it achieves:** When AutoPilot stages a deploy from the browser, this agent picks it up from Supabase and delivers it to the POS tablet — executing the generated SQL, pushing branding/item images via SCP, and restarting the POS Electron app so changes take effect immediately.
+**Current status (2026-04-17):** launchd plist moved to `~/Library/LaunchAgents/disabled/`. When the daemon runs, its batch-submission side is the primary Anthropic spender for the suite. The `SEPARATION_AUDIT.md` + `REFACTOR_PLAN.md` next to this file describe a future state where the batch side moves to `batch_pipeline.py` and is gated behind `DEPLOY_ONLY=1`, but that refactor has not landed — **there is no `DEPLOY_ONLY` check in the code today**.
+
+**What it achieves:** (1) When AutoPilot stages a deploy from the browser, this agent picks it up from Supabase and delivers it to the POS tablet — executing the generated SQL, pushing branding/item images via SCP, and restarting the POS Electron app so changes take effect immediately. (2) As `batch_queue` rows accumulate in the `pool_*` statuses (from preflight + staged pipeline), the daemon submits Anthropic message batches (`pool_discover` / `pool_extract` / `pool_modifier` / `pool_branding` via `claude-haiku-4-5-20251001`, `pool_pdf` via `claude-sonnet-4-6`) and polls/drains the results back into `batch_queue` rows.
 
 **Inputs / env vars (from `agent/.env`):**
 

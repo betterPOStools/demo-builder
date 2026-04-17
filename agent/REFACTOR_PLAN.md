@@ -36,7 +36,11 @@ CREATE INDEX IF NOT EXISTS idx_batch_queue_preflight_url_class
 
 Additive only — existing `extraction_result`, `modifier_result`, `branding_result`, `*_batch_id` columns all stay so `/api/batch/ingest` is unaffected.
 
-### `011_batch_resume_semantics.sql` (ships in PR3)
+### `012_batch_resume_semantics.sql` (ships in PR3)
+
+**Note on numbering:** migration `011_image_library.sql` already shipped with the image-library feature. The two new migrations below take the next free numbers (012, 013).
+
+
 
 ```sql
 ALTER TABLE demo_builder.batch_queue
@@ -56,7 +60,7 @@ CREATE INDEX IF NOT EXISTS idx_batch_queue_needs_review
 
 See §2.5 for usage.
 
-### `012_batch_queue_events.sql` (ships in PR3)
+### `013_batch_queue_events.sql` (ships in PR3)
 
 Per-row append-only event log. Status column on `batch_queue` stays as the
 fast-lookup denormalized cache; history is the operator's decision substrate.
@@ -169,9 +173,11 @@ Clear `*_batch_id`, `batch_submitted_at`, `last_polled_at`,
 `branding_result` / `preflight` (the work already done stays visible
 during review).
 
-**Recovery:** operator runs `rebuild_batch.py --recover-orphans` to move
-`status='needs_review' AND review_reason='stuck_orphan'` rows back to
-`queued` (preflight stays, only rebuild_run_id clears). Never automatic.
+**Recovery:** operator runs `rebuild_batch.py --recover-review stuck_orphan`
+(legacy alias `--recover-orphans`) to move `status='needs_review' AND
+review_reason='stuck_orphan'` rows back to `queued`. Preflight stays,
+`rebuild_run_id` stays (§2.10 clarified this). Never automatic. Full
+per-reason recovery matrix in §2.10.
 
 ### §2.4 — Assemble dedup + mid-deploy guard
 
@@ -222,6 +228,71 @@ if (existing.data?.deploy_status &&
 // ... proceed with upsert
 ```
 
+**Idempotency contract (required by §2.4a assemble resume).** The
+ingest route must be fully replay-safe under same-input retry:
+
+- Never INSERT a new `sessions` row if one exists for `pt_record_id`;
+  always upsert into the existing row.
+- Overwrite `generated_sql`, `pending_images`, and `deploy_status='idle'`
+  deterministically from the same `batch_queue` inputs.
+- Vercel Blob uploads keyed by `deploy/{sessionId}/{imageName}.{ext}`
+  — retry overwrites the same blob path; no duplicate blobs accumulate.
+- No non-idempotent side effects (Slack posts, emails, external
+  webhooks, etc.). Ingest is DB-and-Blob only.
+
+### §2.4a — Assemble resume model
+
+Assemble is not an AI stage — it's a synchronous POST to
+`/api/batch/ingest` — so the §7.6 FRESH/ACTIVE/DRAINED matrix does not
+apply. Resume semantics for assemble use a separate bucket table:
+
+| Bucket | Condition | Action |
+|---|---|---|
+| GONE | `rebuild_run_id != R` | Don't touch. |
+| DONE | `rebuild_run_id = R AND status = 'done' AND session_id IS NOT NULL` | Skip. |
+| DEADLETTERED | `rebuild_run_id = R AND status = 'needs_review'` | Skip (operator handles via `--recover-orphans` or manual recovery per §2.5). |
+| PENDING | `rebuild_run_id = R AND status = 'ready_to_assemble'` | POST `/api/batch/ingest`. |
+| UPSTREAM_NOT_DONE | `rebuild_run_id = R AND status IN ('pool_*', 'batch_*_submitted', 'ready_for_extract', 'ready_for_modifier', 'ready_for_branding', …)` | Skip — AI stages haven't drained yet for this row. |
+
+PENDING is the only bucket `run_assemble` touches.
+
+**Crash cases (no "IN_FLIGHT assemble" DB state because POST is synchronous):**
+
+1. **Request never reached Vercel.** DB still says `ready_to_assemble`.
+   Resume retries. Safe.
+2. **Request reached Vercel, ingest succeeded, response lost (client died).**
+   DB still says `ready_to_assemble` on rebuild side, but `sessions`
+   row for that `pt_record_id` already exists. Resume retries; the
+   §2.4 idempotency contract guarantees the second POST upserts the
+   same session without duplication. Terminal state converges to DONE.
+3. **Request reached Vercel, ingest failed mid-write** (e.g. Vercel
+   Blob threw after SQL was staged). DB says `ready_to_assemble`;
+   `sessions` row may be partial. Resume retries. Same idempotent
+   upsert overwrites partial state cleanly.
+
+**Dispatch ordering.** `run_assemble` is the last phase in
+`rebuild_batch`'s main flow. Invocation order: preflight → stage
+groups (AI) → `run_assemble` → `print_report`. `ready_to_assemble` is
+only set by `_transition_between_stages` AFTER every required AI stage
+for that row has either DRAINED successfully or been waived (e.g. the
+row's preflight `ai_needed` set never included that stage).
+
+```python
+def run_assemble(run_id, supabase):
+    rows = supabase.select("batch_queue", where={
+        "rebuild_run_id": run_id,
+        "status": "ready_to_assemble",
+    })
+    with ThreadPoolExecutor(max_workers=ASSEMBLE_WORKERS) as ex:
+        for row in rows:
+            ex.submit(_post_ingest, row, run_id)
+```
+
+No retry loop wrapping `run_assemble` itself — a second `rebuild_batch
+--run-id R` invocation IS the retry, and it picks up the same PENDING
+rows by status. Per-row 429 retry-with-jitter still happens inside
+`_post_ingest` per §7.17.
+
 ### §2.5 — Resume authority: `active_batch_run_id` + `needs_review` status
 
 Today there is no per-row pairing between a run and an in-flight batch:
@@ -230,7 +301,7 @@ written at submit, nothing joins them. A fresh `--run-id R2` invocation
 cannot distinguish "R1's extract_batch_id is still running" from "R1's
 extract_batch_id is stale from a dead R1."
 
-Migration 011 adds two columns (see §1):
+Migration 012 adds two columns (see §1):
 
 - **`active_batch_run_id TEXT`** — "this run owns this in-flight batch."
   Written in `submit_batch` alongside `{stage}_batch_id`. Cleared in
@@ -249,35 +320,190 @@ the pipeline. Not surfaced to PT — `/api/batch/load` filter stays
 = 'needs_review'` never has a deploy. Operator tools:
 
 - `agent/analyze_failures.py` learns `--review-reason X` filter
-- `rebuild_batch.py --recover-orphans` (see §2.0b) moves
-  `status='needs_review' AND review_reason='stuck_orphan'` → `queued`
-- No other automatic path out of `needs_review`. Every other
-  `review_reason` requires code or data change before recovery.
+- `rebuild_batch.py --recover-review <reason>` (see §2.10) moves rows
+  back to the appropriate upstream pool per the recovery matrix. Legacy
+  alias `--recover-orphans` == `--recover-review stuck_orphan`.
+- No automatic path out of `needs_review`. `assemble_validation` and
+  `deadletter_post_drain` additionally require `--force` — they need
+  a code or data change first.
 
 **Submit-time writes (in `submit_batch`):**
 
 ```python
+meta = STAGES[stage]          # see §2.5b
 patch = {
-    f"{stage}_batch_id": anth_batch.id,
-    "active_batch_run_id": current_run_id,
-    "batch_submitted_at": now_iso,
-    "status": f"batch_{stage}_submitted",
+    meta["batch_id_col"]:   anth_batch.id,
+    "active_batch_run_id":  current_run_id,
+    "batch_submitted_at":   now_iso,
+    "status":               f"batch_{stage}_submitted",
 }
 # Idempotency guard: only write if currently unset for this row+stage
 # (prevents cost-doubling if submit is retried mid-write)
-supabase.update(patch, where=f"{stage}_batch_id.is.null")
+supabase.update(patch, where=f'{meta["batch_id_col"]}.is.null')
 ```
 
 **Drain-time writes (in `wait_and_drain`):**
 
 ```python
 # On successful drain of a row:
+meta = STAGES[stage]
 patch = {
-    f"{stage}_result": result_json,
     "active_batch_run_id": None,   # release ownership
-    "status": next_stage_pool,
+    "status":              next_stage_pool,
+}
+if meta["result_col"] is not None:
+    patch[meta["result_col"]] = result_json
+```
+
+Note the result-column indirection: extract, pdf, and image_menu all
+write to `extraction_result` (historical column reuse); modifier and
+branding have their own result columns; discover has none (status
+transition only). See §2.5b.
+
+### §2.5a — Pre-submit orphan reconciliation (crash idempotency)
+
+**Problem.** `submit_batch` does two non-atomic writes: (1) Anthropic
+`batches.create`, (2) Supabase PATCH writing `{stage}_batch_id` +
+`active_batch_run_id`. If the process dies between (1) and (2), the row's
+DB state still looks FRESH per §7.6 (`{stage}_batch_id IS NULL`). A resume
+would re-submit → **second Anthropic batch, double billing**. The §2.5
+"idempotency guard" `where=f"{stage}_batch_id.is.null"` prevents a DB-side
+double-write, but not the second Anthropic call.
+
+**Fix.** Before creating any batch for stage S under run R, reconcile
+against Anthropic's own batch list using metadata we wrote on (1).
+
+**Metadata contract.** Every Anthropic batch created by `submit_batch`
+must be tagged with:
+
+```python
+metadata = {
+    "rebuild_run_id": run_id,
+    "stage":          stage,              # discover|extract|modifier|branding|pdf|image_menu
+    "batch_key":      batch_key,          # deterministic content hash of input rows
 }
 ```
+
+`batch_key = sha256(",".join(sorted(row_ids))).hexdigest()[:16]` — same
+input row set always produces the same key, so an orphan is recognizable
+on resume even if the crash happened *before* any DB write.
+
+**Reconcile function:**
+
+```python
+def reconcile_orphan_batches(stage: str, run_id: str,
+                             run_start_ts: datetime) -> dict[str, str]:
+    """Returns {batch_key: anthropic_batch_id} for in-flight or ended
+       batches this run created for this stage, regardless of whether
+       Supabase ever recorded them."""
+    orphans = {}
+    page = anthropic.messages.batches.list(limit=100)
+    while True:
+        for batch in page.data:
+            if batch.created_at < run_start_ts:
+                return orphans  # past the run window, stop paging
+            meta = batch.metadata or {}
+            if (meta.get("rebuild_run_id") == run_id
+                and meta.get("stage") == stage
+                and batch.processing_status in ("in_progress", "ended")):
+                key = meta.get("batch_key")
+                if key:
+                    orphans[key] = batch.id
+        if not page.has_more:
+            break
+        page = page.get_next_page()
+    return orphans
+```
+
+**`submit_batch` flow under this fix:**
+
+1. Group rows into batches; compute `batch_key` per batch.
+2. Call `reconcile_orphan_batches(stage, run_id, run_start_ts)` once.
+3. For each batch_key already in orphans: **skip `batches.create`.**
+   Write `{stage}_batch_id = orphans[key]`, `active_batch_run_id = R`,
+   `status = batch_{stage}_submitted`. Emit `adopted_orphan` event per §2.9.
+4. For each batch_key not in orphans: `batches.create` normally, then write.
+
+**Cost.** One `batches.list` call per stage group (plus pagination for
+long-running operators). Zero added Anthropic spend in the common case;
+avoids up to one full batch-worth of duplicate spend per crash.
+
+**Run window tracking.** `run_start_ts` is persisted at `--run-id R`
+creation time to stop pagination. For resume invocations, use the earliest
+`preflight_run_at` for rows with `rebuild_run_id=R` minus a 1h safety
+margin — covers clock skew and reconciles across machine reboots.
+
+**Interaction with §2.5 idempotency guard.** Orphan adoption still honors
+the `where=f"{stage}_batch_id.is.null"` guard; if the DB *did* record the
+batch_id (so it's not really an orphan), the UPDATE no-ops and the row
+is already ACTIVE per §7.6 — drained in the next loop pass.
+
+**Unit test fixtures required:**
+- Simulate pre-DB-write crash: stub `batches.create` success, stub
+  Supabase PATCH to raise, verify resume adopts the orphan without
+  calling `batches.create` a second time.
+- Two-batch scenario: one successful write, one crashed write; resume
+  must adopt only the orphan, submit fresh for any new unsubmitted rows.
+- Cross-run isolation: `rebuild_run_id` mismatch must not adopt.
+
+### §2.5b — `STAGES` constant (canonical stage → column map)
+
+Every `{stage}_batch_id` / `{stage}_result` reference in this plan and
+in PR3 code resolves through this table. No string-templated column
+names, because the result-column convention is NOT uniform: extract,
+pdf, and image_menu all share the `extraction_result` column
+(historical reuse — see migrations 004, 008, 009); modifier and
+branding have their own; discover has none.
+
+Lives in `pipeline_shared.py`:
+
+```python
+from typing import TypedDict, Literal
+
+class StageMeta(TypedDict):
+    batch_id_col: str
+    result_col:   str | None
+
+STAGES: dict[str, StageMeta] = {
+    "discover":   {"batch_id_col": "discover_batch_id",   "result_col": None},
+    "extract":    {"batch_id_col": "extract_batch_id",    "result_col": "extraction_result"},
+    "modifier":   {"batch_id_col": "modifier_batch_id",   "result_col": "modifier_result"},
+    "branding":   {"batch_id_col": "branding_batch_id",   "result_col": "branding_result"},
+    "pdf":        {"batch_id_col": "pdf_batch_id",        "result_col": "extraction_result"},
+    "image_menu": {"batch_id_col": "image_menu_batch_id", "result_col": "extraction_result"},
+}
+
+Stage = Literal["discover", "extract", "modifier", "branding", "pdf", "image_menu"]
+```
+
+**Schema note — no new batch_id columns needed.** All six
+`{stage}_batch_id` columns already exist on `batch_queue`:
+
+| Stage | Column | Shipped in |
+|---|---|---|
+| discover, extract, modifier, branding | `{stage}_batch_id` | migration 004 |
+| pdf | `pdf_batch_id` | migration 008 |
+| image_menu | `image_menu_batch_id` | migration 009 |
+
+Migration 012 (§1) only adds `active_batch_run_id` + `review_reason`.
+
+**Startup assertion (bail fast on schema drift):** `rebuild_batch.py`
+must verify at startup that every column referenced in `STAGES` exists
+on `batch_queue`:
+
+```python
+def _assert_schema(supabase):
+    required = {meta["batch_id_col"] for meta in STAGES.values()}
+    required |= {c for c in (m["result_col"] for m in STAGES.values()) if c}
+    required |= {"active_batch_run_id", "review_reason", "rebuild_run_id",
+                 "preflight", "batch_submitted_at"}
+    existing = set(supabase.introspect("batch_queue").columns)
+    missing = required - existing
+    if missing:
+        raise SystemExit(f"schema drift: missing columns {sorted(missing)}")
+```
+
+Catches "migration 012 not yet applied" before any AI spend.
 
 ### §2.6 — `max_tokens` truncation detection (hole #3)
 
@@ -295,10 +521,21 @@ succeeded Anthropic request in a batch. If `stop_reason == 'max_tokens'`:
    for operator inspection.
 
 Under operator policy "no automatic resubmission," truncated rows stay
-in `needs_review` until the operator manually handles them (e.g. by
-bumping `max_tokens` in a code change and running `--recover-orphans`
-equivalent for truncated — TBD, probably just `--reset` with explicit
-status filter).
+in `needs_review` until the operator manually bumps `max_tokens` in a
+code change and runs `rebuild_batch.py --recover-review truncated`. See
+**§2.10** for the full per-`review_reason` recovery matrix.
+
+**Truncation provenance for recovery.** At truncation time, `wait_and_drain`
+writes three fields into `extraction_result` on the row so §2.10's
+recovery path has what it needs:
+
+```python
+extraction_result = {
+    "raw_truncated_response": raw_text,
+    "truncated_stage":        stage,                 # which STAGES key truncated
+    "truncated_max_tokens":   max_tokens_at_submit,  # for later "did you bump it?" check
+}
+```
 
 ### §2.7 — `restaurant_type` normalization at assemble (hole #10)
 
@@ -386,7 +623,7 @@ happened to this pt_record_id across runs?" without reconstructing
 from `status`/`deploy_status` snapshots. Complements §2.5's terminal
 status — status says *where the row is*, events say *how it got there*.
 
-**Schema:** migration 012 (already defined in §1). Table
+**Schema:** migration 013 (already defined in §1). Table
 `demo_builder.batch_queue_events`, FK to `batch_queue.id` with
 `ON DELETE CASCADE`. Rows are write-once — no UPDATE path.
 
@@ -405,7 +642,13 @@ status — status says *where the row is*, events say *how it got there*.
 | `assemble_succeeded` | 2xx response | — |
 | `assemble_failed` | 4xx/5xx after retries | `http_status`, `error_text`, `review_reason='assemble_validation'` |
 | `marked_orphan` | §2.0b `reclaim_stuck` routes to `needs_review` | `review_reason='stuck_orphan'` |
-| `recovered` | `--recover-orphans` moves back to `queued` | — |
+| `adopted_orphan` | §2.5a reconciliation picks up an Anthropic-side orphan batch | `batch_id` |
+| `recovered_stuck_orphan` | `--recover-review stuck_orphan` moves back to `queued` | — |
+| `recovered_truncated` | `--recover-review truncated` archives raw + re-pools | `output_tokens` (prior), `error_text=archive_count` |
+| `recovered_errored` | `--recover-review errored` re-pools | — |
+| `recovered_canceled` | `--recover-review canceled` re-pools | — |
+| `recovered_expired` | `--recover-review expired` re-pools | — |
+| `recovered_deploy_collision` | `--recover-review deploy_in_flight_collision` moves back to `ready_to_assemble` | — |
 
 **Helper signature** (`agent/rebuild_batch.py`):
 
@@ -585,6 +828,78 @@ syntax, the regex silently yields `{}` and PR3 submits empty system prompts
 3. Fail fast (`SystemExit(3)`) if either assertion fails. Do not run with
    degraded prompts.
 
+### §2.10 — Recovery paths from `needs_review`
+
+Operator-driven recovery of rows sitting in `status='needs_review'`.
+Generalizes the original `--recover-orphans` flag (hole in §2.6) so
+every `review_reason` has a defined path back into the pipeline, not
+just `stuck_orphan`.
+
+**CLI:**
+
+```
+--recover-review <reason>   Move rows with status='needs_review' AND
+                            review_reason=<reason> back to the correct
+                            upstream pool. Defaults to dry-run.
+--recover-orphans           Legacy alias for --recover-review stuck_orphan.
+--force                     Required for reasons marked "manual only".
+--dry-run                   Print counts per reason without writing.
+--run-id R                  Limit recovery to rows with rebuild_run_id=R.
+                            Optional; default is all matching rows.
+```
+
+**Per-reason recovery matrix:**
+
+| `review_reason` | Recovery action | New status | Preserved fields | Manual-only? |
+|---|---|---|---|---|
+| `stuck_orphan` | clear `{stage}_batch_id`, `active_batch_run_id` | `queued` | preflight, rebuild_run_id, extraction_result | no |
+| `truncated` | archive raw + clear stage batch_id + clear truncation fields from `extraction_result` | `pool_{truncated_stage}` | preflight, rebuild_run_id | no |
+| `errored` | clear `{stage}_batch_id`, `active_batch_run_id` | `pool_{stage}` | preflight, rebuild_run_id, extraction_result | no |
+| `canceled` | same as errored | `pool_{stage}` | same | no |
+| `expired` | same as errored | `pool_{stage}` | same | no |
+| `deploy_in_flight_collision` | verify `sessions.deploy_status NOT IN ('queued','executing')`; if still colliding, skip; else move back | `ready_to_assemble` | everything | no |
+| `assemble_validation` | clear nothing (operator is expected to have pushed a code fix first) | `ready_to_assemble` | everything | **yes (`--force`)** |
+| `deadletter_post_drain` | clear preflight to force re-classify next run | `queued` | rebuild_run_id only | **yes (`--force`)** |
+
+**Truncated-specific contract** (the original §2.6 TBD):
+
+1. Read `extraction_result.truncated_stage` (written at truncation
+   time per §2.6). This is the stage to re-pool into.
+2. Append current `extraction_result.raw_truncated_response` to
+   `extraction_result.archive_truncated[]` (creates list if absent).
+   Supports multiple truncation-recovery cycles without losing history.
+3. Append current `extraction_result.truncated_max_tokens` to
+   `extraction_result.archive_max_tokens[]`.
+4. Clear the three truncation fields
+   (`raw_truncated_response`, `truncated_stage`, `truncated_max_tokens`).
+5. Clear `{truncated_stage}_batch_id`, `active_batch_run_id`.
+6. Set `status = pool_{truncated_stage}`.
+7. Emit `recovered_truncated` event per §2.9 with prior `output_tokens`
+   from the last truncation and archive count in `error_text`.
+8. **No validation that operator actually bumped `max_tokens`.** Trust
+   operator. But log a WARNING if `len(archive_truncated) > 1` and the
+   last `archive_max_tokens[-1]` equals the current code constant —
+   strong signal operator forgot to bump.
+
+**`deploy_in_flight_collision` liveness check.** Before re-pooling,
+re-query `sessions.deploy_status` for the row's `pt_record_id`. If
+still in `('queued','executing')` → no-op + emit WARNING (do not
+advance the row). If in any other state → proceed. Prevents recovery
+from racing an in-flight deploy.
+
+**Interaction with `--run-id`.** Recovery does NOT alter
+`rebuild_run_id` — the recovered row stays tagged with whichever run
+originally produced it. A subsequent `rebuild_batch --run-id R`
+invocation picks up the recovered rows via §7.6's FRESH predicate (or
+§2.4a's PENDING, depending on reason). A fresh `--run-id R_new`
+invocation does not pick up the recovered rows unless the operator
+also re-tags via `--reset --run-id R_new` (two-step — same policy as
+§7.6's mutual exclusion).
+
+**Recovery is never automatic.** No background job, no reaper, no
+retry loop. Every exit from `needs_review` requires explicit CLI
+invocation — operator policy from `memory/feedback_failures_never_auto_retry.md`.
+
 ---
 
 ## 3. `deploy_agent.py` Reduction — 2759 → ~750 lines
@@ -650,9 +965,9 @@ deploy_agent.py  (~750 lines, deploy-only)
 
 ### PR 3 — AI batch submission + drain-only resume
 
-**Schema** (migrations `011_batch_resume_semantics.sql` + `012_batch_queue_events.sql` per §1):
-- 011: Add `active_batch_run_id TEXT` column + index; add `review_reason TEXT` column + partial index on `needs_review`
-- 012: Create `batch_queue_events` append-only history table (§2.9) with indexes on `(batch_queue_id, ts DESC)`, `(rebuild_run_id)`, `(stage, event_type, ts DESC)`
+**Schema** (migrations `012_batch_resume_semantics.sql` + `013_batch_queue_events.sql` per §1):
+- 012: Add `active_batch_run_id TEXT` column + index; add `review_reason TEXT` column + partial index on `needs_review`
+- 013: Create `batch_queue_events` append-only history table (§2.9) with indexes on `(batch_queue_id, ts DESC)`, `(rebuild_run_id)`, `(stage, event_type, ts DESC)`
 
 **Core functions:**
 - `build_stage_batch`, `submit_batch`, `wait_and_drain`, `run_stage_group`, `_transition_between_stages`, `run_assemble`, `print_report`
@@ -664,7 +979,7 @@ deploy_agent.py  (~750 lines, deploy-only)
 - `reclaim_stuck` (§2.0b) emits `marked_orphan`; `--recover-orphans` emits `recovered`
 - `preflight_row` backfill: emit `preflight_classified` for rows preflighted in PR3's reset path (PR1 ran pre-events; PR3 re-preflights on reset and writes the event going forward)
 
-**Flags:** `--force-budget`, `--skip-assemble`, `--include-done`, `--replace-session`, `--recover-orphans`, `--cache-mode {auto,off,force-5min,force-1h}`. `--run-id` and `--reset` mutually exclusive (see §7.6).
+**Flags:** `--force-budget`, `--skip-assemble`, `--include-done`, `--replace-session`, `--recover-review <reason>` (alias `--recover-orphans` = `--recover-review stuck_orphan`), `--force` (required for `assemble_validation` / `deadletter_post_drain` recovery per §2.10), `--cache-mode {auto,off,force-5min,force-1h}`. `--run-id` and `--reset` mutually exclusive (see §7.6).
 
 **Orchestration:**
 - `§2.0` reset + `§2.0b` orphan handling runs every invocation (own-run exclusion per hole #4 fix)
@@ -692,6 +1007,8 @@ deploy_agent.py  (~750 lines, deploy-only)
 - Cache stats table prints per stage with cache_create/cache_read ratios (§7.16 cache section)
 - **Event log coverage:** after the 30-row end-to-end run, every row has ≥2 events (`submitted` + one of the `drained_*`); successful rows have `assemble_succeeded`; `needs_review` rows have the terminal event matching their `review_reason`. SQL check: `SELECT COUNT(*) FROM batch_queue WHERE rebuild_run_id=:r AND NOT EXISTS (SELECT 1 FROM batch_queue_events WHERE batch_queue_id=batch_queue.id)` must be 0.
 - **Event-write failure isolation:** inject a forced error in `log_event` → stage still completes successfully (event loss is non-fatal per §2.9).
+- **Assemble idempotency under crash:** kill `run_assemble` after POST is sent but before response is received (e.g. SIGKILL the Python process); restart `rebuild_batch --run-id R`; verify the same `pt_record_id` ends with exactly one `sessions` row (not two), same `session_id` as the first successful write, and `generated_sql` identical byte-for-byte. Covers §2.4a crash case #2. SQL check: `SELECT pt_record_id, COUNT(*) FROM sessions WHERE pt_record_id IN (:run_rows) GROUP BY 1 HAVING COUNT(*) > 1` must return zero rows.
+- **Truncation recovery round-trip:** force a truncation by submitting one row with `max_tokens=100`; verify row lands in `status='needs_review'`, `review_reason='truncated'`, with `extraction_result.raw_truncated_response` + `truncated_stage` + `truncated_max_tokens=100` populated. Restore code `max_tokens=32000`, run `rebuild_batch --recover-review truncated --run-id R`; verify row returns to `pool_{stage}`, `extraction_result.archive_truncated` has length 1 holding the prior raw, `extraction_result.archive_max_tokens = [100]`, truncation fields cleared. Re-run rebuild: row drains successfully with non-truncated result. Covers §2.10 truncated-specific contract.
 - **First production run discipline:** ship with `--cache-mode off` for the first full run after PR3 lands. Capture per-stage cost actuals as the new baseline. Second run uses `--cache-mode auto` and `print_report` quantifies cache savings vs the off baseline (cf. memory `feedback_batch_caching_cost_regression.md` "do not re-enable without measured A/B").
 
 ### PR 4 — Delete legacy from deploy_agent.py
@@ -782,7 +1099,7 @@ prints the same projection. Pre-flight + pre-submit = two hold points.
    |---|---|---|
    | GONE | `rebuild_run_id != R` | Don't touch. |
    | DRAINED | `{stage}_result IS NOT NULL` | Skip. |
-   | FRESH | `rebuild_run_id = R AND {stage}_batch_id IS NULL AND preflight.ai_needed ⊃ {S}` | First-time submit (not a resubmit). |
+   | FRESH | `rebuild_run_id = R AND {stage}_batch_id IS NULL AND preflight.ai_needed ⊃ {S}` | Run §2.5a orphan reconciliation first (adopt any Anthropic-side orphan for this `batch_key`); only if no orphan matches → submit. |
    | ACTIVE | `rebuild_run_id = R AND {stage}_batch_id IS NOT NULL AND active_batch_run_id = R` | Poll Anthropic, drain per below. |
 
    **ACTIVE batch disposition** (group rows by distinct `{stage}_batch_id`, one Anthropic call per batch):
@@ -797,6 +1114,11 @@ prints the same projection. Pre-flight + pre-submit = two hold points.
    **Drain must also inspect `stop_reason=='max_tokens'`** per §2.6 — those rows go to `needs_review` with `review_reason='truncated'` regardless of batch-level status.
 
    **Edge case — `--run-id R_new` with an existing-but-expired Anthropic batch owned by a past run:** the row has `{stage}_batch_id` set but `active_batch_run_id != R_new`. §2.0b reclaim routes it to `needs_review` with `review_reason='stuck_orphan'`. Operator recovers via `--recover-orphans`.
+
+   **Assemble stage.** This matrix covers only the six AI stages
+   (discover, extract, modifier, branding, pdf, image_menu). Assemble
+   resume semantics live in **§2.4a** — separate bucket table, idempotent
+   retry via §2.4 upsert-by-`pt_record_id`.
 7. **Hot-path `/api/batch/process`** — preserve the route file (only `process_generate_queue` calls it, being deleted). Mark with comment "HOT-PATH ONLY — sync extraction for single PT lead". Re-evaluate in follow-up.
 8. **Reset semantics + MEMORY.md "don't break PT mid-route"** — default `--reset` scope is `status in ('failed','queued','pool_*')`, never `done`. Add `--include-done` flag (dangerous, explicit opt-in only).
 9. **Legacy BATCH_BUDGET_USD env** — if any runbook sets this to 5.0, new pipeline now treats it as hard cap. Audit before cutover.
@@ -895,3 +1217,7 @@ prints the same projection. Pre-flight + pre-submit = two hold points.
 | 2026-04-16 PM | PR3 review — 10 holes patched: migration 011 (`active_batch_run_id`, `review_reason`), §2.0b own-run exclusion, §2.4 mid-deploy 409 guard, §2.5 resume authority, §2.6 `max_tokens` detection, §2.7 `restaurant_type` coercion, §7.6 drain-only resume + predicate matrix, §7.12 pgbouncer port 5432 requirement, §7.16 post-flight variance + cache stats, §7.17 `ASSEMBLE_WORKERS=4`, §7.18 image-menu reroute |
 | 2026-04-16 PM | §2.8 cache-mode selector + `--cache-mode` CLI + runtime empirical override + per-row drift guard unit test |
 | 2026-04-16 PM | §2.9 + migration 012 (`batch_queue_events`) — per-row append-only history for operator "what happened to this pt_record_id" analysis; event writes in PR3, analysis CLI deferred to PR6 |
+| 2026-04-17 AM | §2.5a — pre-submit orphan reconciliation via Anthropic `batches.list` + metadata `{rebuild_run_id, stage, batch_key}`; prevents double-billing if `submit_batch` crashes between `batches.create` and Supabase PATCH; §7.6 FRESH predicate updated to run reconciliation before submit |
+| 2026-04-17 AM | §2.5b — `STAGES` constant pinning stage→column map; resolves non-uniform result-column convention (`extraction_result` shared by extract/pdf/image_menu). Migrations renumbered 011→012 (batch_resume_semantics) + 012→013 (batch_queue_events) to avoid collision with shipped `011_image_library.sql`. Schema drift assertion added. All `f"{stage}_*"` references throughout §2.5 updated to go through `STAGES[stage]`. |
+| 2026-04-17 AM | §2.4a — assemble resume bucket table (GONE/DONE/DEADLETTERED/PENDING/UPSTREAM_NOT_DONE); crash-case analysis relies on §2.4 ingest idempotency contract (now stated explicitly). §7.6 cross-references §2.4a since assemble is not an AI stage. PR3 validation adds mid-POST crash test verifying single session_id + byte-identical generated_sql. |
+| 2026-04-17 AM | §2.10 — per-`review_reason` recovery matrix + `--recover-review <reason>` flag (generalizes `--recover-orphans`, which becomes a legacy alias). Resolves §2.6's TBD for truncated recovery: archive `raw_truncated_response` + `max_tokens` into `extraction_result.archive_*[]` lists, clear truncation fields, re-pool to `pool_{truncated_stage}`. §2.6 now writes `truncated_stage` + `truncated_max_tokens` at truncation time so recovery has provenance. `assemble_validation` and `deadletter_post_drain` gated behind `--force` since they require upstream code/data fix. §2.9 event vocabulary gains `recovered_truncated` / `recovered_errored` / `recovered_canceled` / `recovered_expired` / `recovered_stuck_orphan` / `recovered_deploy_collision` / `adopted_orphan`. PR3 validation adds truncation round-trip test. |
