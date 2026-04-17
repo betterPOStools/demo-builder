@@ -575,7 +575,7 @@ function OrderScreen({
 
 // ---------- Main Component ----------
 
-export function POSPreview() {
+export function POSPreview({ fullscreen = false }: { fullscreen?: boolean } = {}) {
   const groups = useStore((s) => s.groups);
   const items = useStore((s) => s.items);
   const modifierTemplates = useStore((s) => s.modifierTemplates);
@@ -589,6 +589,23 @@ export function POSPreview() {
         <p className="text-sm text-slate-500">
           Add menu items to see the POS preview
         </p>
+      </div>
+    );
+  }
+
+  if (fullscreen) {
+    return (
+      <div className="h-full w-full bg-[#0f172a]">
+        {screen === "main" ? (
+          <MainScreen branding={branding} onStart={() => setScreen("order")} />
+        ) : (
+          <OrderScreen
+            groups={groups}
+            items={items}
+            modifierTemplates={modifierTemplates}
+            branding={branding}
+          />
+        )}
       </div>
     );
   }

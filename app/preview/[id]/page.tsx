@@ -52,13 +52,8 @@ export default function FullscreenPreviewPage({
   }
 
   return (
-    <div className="flex h-screen w-screen items-center justify-center overflow-hidden bg-black">
-      <div
-        className="max-h-full max-w-full"
-        style={{ aspectRatio: "1024 / 716", width: "100vw", height: "calc(100vw * 716 / 1024)", maxHeight: "100vh", maxWidth: "calc(100vh * 1024 / 716)" }}
-      >
-        <POSPreview />
-      </div>
+    <div className="h-screen w-screen overflow-hidden bg-black">
+      <POSPreview fullscreen />
     </div>
   );
 }
