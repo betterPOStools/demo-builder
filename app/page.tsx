@@ -15,6 +15,7 @@ import {
   Clock,
   Rocket,
   AlertCircle,
+  Tablet,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -23,7 +24,17 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { QuickStartDialog } from "@/components/QuickStartDialog";
 import { BatchFeed } from "@/components/batch/BatchFeed";
 import { generateId } from "@/lib/utils";
+import { useStore } from "@/store";
+import {
+  mapTabletSnapshot,
+  fetchImageAsDataUri,
+  type TabletSnapshot,
+} from "@/lib/sql/fromTablet";
 import { toast } from "sonner";
+
+const SNAPSHOT_SERVER_URL =
+  process.env.NEXT_PUBLIC_SNAPSHOT_SERVER_URL ||
+  "https://aarons-imac-1.tail0f324a.ts.net";
 
 interface Session {
   id: string;
@@ -198,9 +209,11 @@ function SessionRow({
 
 export default function LibraryPage() {
   const router = useRouter();
+  const loadFromTablet = useStore((s) => s.loadFromTablet);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
+  const [loadingFromTablet, setLoadingFromTablet] = useState(false);
 
   const load = useCallback(() => {
     fetch("/api/sessions")
@@ -214,6 +227,69 @@ export default function LibraryPage() {
 
   function handleNewProject() {
     router.push(`/project/${generateId()}/extract`);
+  }
+
+  async function handleLoadFromTablet() {
+    if (loadingFromTablet) return;
+    setLoadingFromTablet(true);
+
+    const tid = toast.loading("Reading tablet snapshot...");
+    try {
+      const connRes = await fetch("/api/connections");
+      if (!connRes.ok) throw new Error("Could not load connections");
+      const { connections } = (await connRes.json()) as {
+        connections: Array<{ name: string; host: string; port: number; database_name: string }>;
+      };
+      const conn =
+        connections.find((c) => c.name.toLowerCase() === "demo tablet") ??
+        connections[0];
+      if (!conn) throw new Error("No saved connection. Save a Demo Tablet connection first.");
+
+      const snapUrl = new URL(`${SNAPSHOT_SERVER_URL.replace(/\/$/, "")}/snapshot`);
+      snapUrl.searchParams.set("host", conn.host);
+      snapUrl.searchParams.set("port", String(conn.port));
+      snapUrl.searchParams.set("db", conn.database_name);
+
+      const snapRes = await fetch(snapUrl.toString(), { cache: "no-store" });
+      if (!snapRes.ok) {
+        throw new Error(`Snapshot failed (${snapRes.status}). Is the Mac agent running?`);
+      }
+      const snap = (await snapRes.json()) as TabletSnapshot;
+      const mapped = mapTabletSnapshot(snap);
+
+      toast.loading("Fetching branding images...", { id: tid });
+      const bgPath = snap.branding.background;
+      const sbPath = snap.branding.sidebar_picture;
+      const [bgUri, sbUri] = await Promise.all([
+        bgPath ? fetchImageAsDataUri(SNAPSHOT_SERVER_URL, conn.host, bgPath).catch(() => null) : null,
+        sbPath ? fetchImageAsDataUri(SNAPSHOT_SERVER_URL, conn.host, sbPath).catch(() => null) : null,
+      ]);
+
+      const payloadBranding = {
+        ...mapped.branding,
+        background_picture: bgUri ?? null,
+        sidebar_picture: sbUri ?? null,
+      };
+
+      let restaurantName = mapped.restaurantName;
+      if (!restaurantName) {
+        const input = window.prompt(
+          "Restaurant name? (not set in tablet store settings)",
+          "",
+        );
+        restaurantName = (input ?? "").trim() || "Loaded from tablet";
+      }
+
+      const newId = generateId();
+      loadFromTablet(newId, { ...mapped, restaurantName, branding: payloadBranding });
+
+      toast.success(`Loaded ${mapped.items.length} items from ${conn.database_name}`, { id: tid });
+      router.push(`/project/${newId}/design`);
+    } catch (e) {
+      toast.error((e as Error).message, { id: tid });
+    } finally {
+      setLoadingFromTablet(false);
+    }
   }
 
   async function handleDelete(id: string) {
@@ -270,6 +346,15 @@ export default function LibraryPage() {
           </div>
           <div className="flex items-center gap-2">
             <QuickStartDialog />
+            <Button
+              onClick={handleLoadFromTablet}
+              variant="outline"
+              className="gap-2"
+              disabled={loadingFromTablet}
+            >
+              <Tablet className="h-4 w-4" />
+              {loadingFromTablet ? "Loading..." : "Load from Tablet"}
+            </Button>
             <Button onClick={handleNewProject} className="gap-2">
               <Plus className="h-4 w-4" /> New Project
             </Button>
