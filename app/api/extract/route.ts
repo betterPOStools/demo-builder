@@ -17,13 +17,27 @@ import {
   EXTENDED_MENU_SYSTEM_PROMPT,
 } from "@/lib/extraction/prompts";
 import { createServerClient } from "@/lib/supabase/server";
+// Batch-governor calc-tokens client. Imported by relative path because the
+// package has not been published to a registry yet; the source is a sibling
+// repo under betterpostools/batch-governor. Single-shot route — no governor
+// gating, only calibration feeds the central pricing + reservoir store.
+import { CalcTokensClient } from "../../../../../batch-governor/clients/ts/calc-tokens/src/index";
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const calcTokens = new CalcTokensClient();
 
 export const maxDuration = 300; // Vercel Fluid Compute
 
 // ---------------------------------------------------------------------------
-// Usage logging — writes to demo_builder.usage_logs
+// Usage logging — writes to demo_builder.usage_logs.
+//
+// Single-source-of-truth pricing lives in the batch-governor calculator
+// service. We fetch the pricing table via the TS calc client instead of
+// hand-rolling per-model rates here. After logging we call
+// ``calibrateWithActualUsage`` so the governor's reservoir tracks actual
+// token distribution for this operation (``menu-extract-{sourceType}``).
+// Governor unreachable? We fall through silently — logging must never
+// block extraction.
 // ---------------------------------------------------------------------------
 async function logUsage(params: {
   model: string;
@@ -39,15 +53,23 @@ async function logUsage(params: {
 }) {
   try {
     const supabase = createServerClient();
-    // Approximate cost: Haiku ~$0.80/M in, $4/M out; Sonnet ~$3/M in, $15/M out
-    const isHaiku = params.model.includes("haiku");
-    const inRate = isHaiku ? 0.8 / 1_000_000 : 3 / 1_000_000;
-    const outRate = isHaiku ? 4 / 1_000_000 : 15 / 1_000_000;
-    const cacheRate = inRate * 0.1; // cache reads are 10% of input cost
-    const cost =
-      params.inputTokens * inRate +
-      params.outputTokens * outRate +
-      (params.cacheReadTokens ?? 0) * cacheRate;
+
+    // Derive cost from the governor's pricing table. Fall back to zero when
+    // the governor is down; usage still lands in usage_logs with cost=0 which
+    // the operator can backfill from raw token counts.
+    let cost = 0;
+    try {
+      const pricingTable = await calcTokens.getPricingTable();
+      const pricing = pricingTable[params.model];
+      if (pricing) {
+        cost =
+          params.inputTokens * pricing.input_per_token +
+          params.outputTokens * pricing.output_per_token +
+          (params.cacheReadTokens ?? 0) * pricing.cache_read_per_token;
+      }
+    } catch {
+      // governor unreachable — cost stays 0, actual tokens still logged
+    }
 
     await supabase.from("usage_logs").insert({
       session_id: params.sessionId ?? null,
@@ -58,6 +80,22 @@ async function logUsage(params: {
       cache_read_tokens: params.cacheReadTokens ?? 0,
       cost,
     });
+
+    // BUSINESS RULE: every real AI call feeds the calibration reservoir so
+    // later projections converge on truth (ADR-001). Fire-and-forget.
+    if (params.ok && params.inputTokens > 0) {
+      try {
+        await calcTokens.calibrateWithActualUsage({
+          operation: `menu-extract-${params.sourceType}`,
+          model: params.model,
+          actual_input: params.inputTokens,
+          actual_output: params.outputTokens,
+          actual_cost_usd: cost,
+        });
+      } catch {
+        // governor unreachable — calibration skipped silently
+      }
+    }
   } catch {
     // Never let logging failures break extraction
   }

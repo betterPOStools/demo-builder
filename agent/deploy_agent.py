@@ -42,6 +42,24 @@ from datetime import datetime, timezone
 import mysql.connector
 import requests
 
+# Batch-governor client shims. The governor + calc_tokens packages are
+# siblings under ``batch-governor/clients/python/`` — add BOTH the repo root
+# and the ``clients/python`` dir to sys.path so short imports resolve. The
+# daemon itself has no direct Anthropic calls today (batch pipeline was
+# extracted to ``batch_pipeline.py`` on 2026-04-17), but the wrapper is
+# imported here so (a) the CI grep rule is visibly satisfied if a batch
+# path is ever re-added inline, and (b) the startup guard can fail fast
+# before any work begins — per the plan's Stream F rules for this file.
+_BATCH_GOVERNOR_ROOT = "/Users/nomad/Projects/betterpostools/batch-governor"
+if _BATCH_GOVERNOR_ROOT not in sys.path:
+    sys.path.insert(0, _BATCH_GOVERNOR_ROOT)
+_BATCH_GOVERNOR_PY_CLIENTS = f"{_BATCH_GOVERNOR_ROOT}/clients/python"
+if _BATCH_GOVERNOR_PY_CLIENTS not in sys.path:
+    sys.path.insert(0, _BATCH_GOVERNOR_PY_CLIENTS)
+
+from governor import Anthropic  # noqa: F401 — daemon guard + future re-add
+from calc_tokens import CalcTokensClient  # noqa: F401 — available for stages
+
 # ---------------------------------------------------------------------------
 # SHARED symbols from pipeline_shared (env is loaded on its import).
 # Only what process_queued actually uses.
@@ -466,7 +484,92 @@ def process_queued():
                 print("  [ERROR] Could not write failure status to Supabase")
 
 
+GOVERNOR_BASE_URL = os.environ.get("GOVERNOR_BASE_URL", "http://127.0.0.1:5185")
+GOVERNOR_APP_NAME = "demo-builder-deploy-agent"
+GOVERNOR_APPS_YAML = f"{_BATCH_GOVERNOR_ROOT}/config/apps.yaml"
+
+
+def _assert_daemon_allowed() -> None:
+    """Refuse to start unless the governor is healthy AND allow_daemon is True.
+
+    The 2026-04-15 incident burned $40–65 because this daemon ran without
+    any budget guard. The plist was moved to ``~/Library/LaunchAgents/disabled/``
+    as an immediate stop-gap; this guard is the permanent fix — even if the
+    plist is restored, the daemon will self-exit unless an operator has
+    explicitly flipped ``allow_daemon: true`` in ``config/apps.yaml`` for
+    ``demo-builder-deploy-agent``.
+
+    Checks (in order, early-exit on any failure):
+      1. Governor ``/healthz`` returns 200.
+      2. Governor ``/v1/status`` returns 200 (proves service is fully up).
+      3. ``config/apps.yaml`` exists and the entry for this app has
+         ``allow_daemon: true``. We read YAML directly because the public
+         ``/v1/status`` response does not expose ``allow_daemon``.
+    """
+    # Step 1 + 2: governor must be reachable and healthy.
+    try:
+        r = requests.get(f"{GOVERNOR_BASE_URL}/healthz", timeout=5)
+        if r.status_code != 200:
+            print(
+                f"ERROR: batch-governor /healthz returned {r.status_code} — "
+                f"refusing to start. See batch-governor/README.md"
+            )
+            sys.exit(1)
+        r = requests.get(f"{GOVERNOR_BASE_URL}/v1/status", timeout=5)
+        if r.status_code != 200:
+            print(
+                f"ERROR: batch-governor /v1/status returned {r.status_code} — "
+                f"refusing to start"
+            )
+            sys.exit(1)
+    except Exception as exc:
+        print(
+            f"ERROR: batch-governor at {GOVERNOR_BASE_URL} unreachable ({exc}). "
+            f"This daemon requires the governor to enforce its budget. "
+            f"Start it with: launchctl load ~/Library/LaunchAgents/"
+            f"com.valuesystems.batch-governor.plist"
+        )
+        sys.exit(1)
+
+    # Step 3: apps.yaml must opt this daemon in explicitly.
+    try:
+        import yaml  # deferred import — only needed for the guard
+    except ImportError:
+        print(
+            "ERROR: pyyaml not installed — required by the batch-governor "
+            "daemon guard. Install with: pip install pyyaml"
+        )
+        sys.exit(1)
+    if not os.path.exists(GOVERNOR_APPS_YAML):
+        print(
+            f"ERROR: batch-governor config missing: {GOVERNOR_APPS_YAML} — "
+            f"refusing to start"
+        )
+        sys.exit(1)
+    with open(GOVERNOR_APPS_YAML) as f:
+        cfg = yaml.safe_load(f) or {}
+    app_cfg = (cfg.get("apps") or {}).get(GOVERNOR_APP_NAME) or {}
+    if not app_cfg.get("allow_daemon", False):
+        print(
+            f"ERROR: {GOVERNOR_APP_NAME} does NOT have `allow_daemon: true` "
+            f"in {GOVERNOR_APPS_YAML}. This daemon was disabled on 2026-04-17 "
+            f"after a $40-$65 overnight burn. Re-enabling requires an ADR "
+            f"entry explaining the budget + watchdog story. Refusing to start."
+        )
+        sys.exit(1)
+    print(
+        f"[governor-guard] OK — app={GOVERNOR_APP_NAME} allow_daemon=true "
+        f"({GOVERNOR_BASE_URL})"
+    )
+
+
 def main():
+    # BUSINESS RULE: daemon must self-exit unless governor confirms both
+    # (a) service is healthy AND (b) this app is allow_daemon:true in
+    # config/apps.yaml. The guard runs BEFORE any other work so early
+    # imports can't bypass it.
+    _assert_daemon_allowed()
+
     if not SUPABASE_URL or not SUPABASE_KEY:
         print("ERROR: SUPABASE_URL and SUPABASE_KEY must be set in agent/.env")
         sys.exit(1)
