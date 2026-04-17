@@ -52,8 +52,18 @@ export default function FullscreenPreviewPage({
   }
 
   return (
-    <div className="h-screen w-screen overflow-hidden bg-black">
-      <POSPreview fullscreen />
+    <div className="flex h-screen w-screen items-center justify-center overflow-hidden bg-black">
+      <div
+        style={{
+          width: "1024px",
+          height: "716px",
+          transform: "scale(min(calc(100vw / 1024), calc(100vh / 716)))",
+          transformOrigin: "center center",
+          flexShrink: 0,
+        }}
+      >
+        <POSPreview fullscreen />
+      </div>
     </div>
   );
 }
