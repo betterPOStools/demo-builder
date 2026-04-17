@@ -66,11 +66,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     : [pt_record_id, `db_${pt_record_id}`];
 
   // --- Look up the session ---
+  // Loadability is "SQL exists", not "deploy_status is one of X". The prior
+  // filter ([idle, done, failed]) hid sessions stuck in queued/executing
+  // that in practice still had usable SQL the user wanted to redeploy.
   const { data: sessionData, error: sessionError } = await supabase
     .from("sessions")
     .select("id, pt_record_id, deploy_status")
     .in("pt_record_id", sessionCandidates)
-    .in("deploy_status", ["idle", "done", "failed"])
+    .not("generated_sql", "is", null)
     .order("created_at", { ascending: false })
     .limit(1)
     .maybeSingle();

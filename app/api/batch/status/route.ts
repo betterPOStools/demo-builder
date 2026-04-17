@@ -25,6 +25,7 @@ interface BatchQueueRow {
 interface SessionRow {
   id: string;
   pt_record_id: string;
+  deploy_status: string;
   created_at: string;
 }
 
@@ -72,12 +73,23 @@ export async function GET(request: Request): Promise<Response> {
     return Response.json({ error: queueError.message }, { status: 500 });
   }
 
-  // Fetch sessions that have completed for these PT records
+  // Phase A2 (2026-04-14) left demo_builder.sessions.pt_record_id carrying the
+  // `db_` prefix while batch_queue.pt_record_id is raw. VPT sends raw place_ids,
+  // PT sends `db_<placeId>`. Match both so either client resolves the same
+  // session. See feedback_pt_record_id_prefix_mismatch.md + /api/batch/load.
+  const sessionCandidates = ptRecordIds.flatMap((id) =>
+    id.startsWith("db_") ? [id, id.slice(3)] : [id, `db_${id}`],
+  );
+
+  // Any session with SQL is loadable — the user explicitly wants the button
+  // shown whenever SQL exists, regardless of deploy_status. A prior filter
+  // restricted this to idle|done and hid loadable sessions stuck in queued,
+  // executing, or failed. See feedback_batch_load_deploy_status_filter.md.
   const { data: sessionRows, error: sessionError } = await supabase
     .from("sessions")
-    .select("id, pt_record_id, created_at")
-    .in("pt_record_id", ptRecordIds)
-    .in("deploy_status", ["idle", "done"]);
+    .select("id, pt_record_id, deploy_status, created_at")
+    .in("pt_record_id", sessionCandidates)
+    .not("generated_sql", "is", null);
 
   if (sessionError) {
     return Response.json({ error: sessionError.message }, { status: 500 });
@@ -92,10 +104,19 @@ export async function GET(request: Request): Promise<Response> {
     }
   }
 
+  // Key sessions by whichever caller id variant (raw or db_-prefixed) the
+  // session maps back to. Sessions stored with "db_" prefix still resolve to
+  // raw place_ids from VPT.
+  const ptIdSet = new Set(ptRecordIds);
   const sessionByPtId = new Map<string, SessionRow>();
   for (const row of (sessionRows ?? []) as SessionRow[]) {
-    if (!sessionByPtId.has(row.pt_record_id)) {
-      sessionByPtId.set(row.pt_record_id, row);
+    const variants = row.pt_record_id.startsWith("db_")
+      ? [row.pt_record_id, row.pt_record_id.slice(3)]
+      : [row.pt_record_id, `db_${row.pt_record_id}`];
+    for (const v of variants) {
+      if (ptIdSet.has(v) && !sessionByPtId.has(v)) {
+        sessionByPtId.set(v, row);
+      }
     }
   }
 
@@ -113,10 +134,22 @@ export async function GET(request: Request): Promise<Response> {
       };
     }
 
+    // Session exists → SQL is loadable unless the deploy is actively running.
+    // Queue status wins only if no loadable session is present.
+    let status: ResultStatus;
+    if (sessionRow) {
+      status =
+        sessionRow.deploy_status === "executing" ? "processing" : "done";
+    } else if (queueRow) {
+      status = queueRow.status;
+    } else {
+      status = "no_snapshot";
+    }
+
     return {
       pt_record_id: ptId,
-      status: queueRow ? queueRow.status : "done",
-      session_id: queueRow?.session_id ?? sessionRow?.id ?? null,
+      status,
+      session_id: sessionRow?.id ?? queueRow?.session_id ?? null,
       error: queueRow?.error ?? null,
       created_at: sessionRow?.created_at ?? queueRow?.created_at ?? null,
     };
