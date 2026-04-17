@@ -68,18 +68,13 @@ Cross-device image store backed by Supabase Storage bucket `image-library` + `de
 ### Generation Template Registry (`lib/generation/templates.ts`)
 Static Record of ~15 templates. Each has `id`, `surfaces`, `model`, `kind`, `wired`. The four generation routes (`generate-item-image`, `fetch-photo`, `generate-branding`, `generate-logo-sidebar`) accept a `templateId` and dispatch accordingly. Prompt variants for FLUX Pro style modes live in `lib/generation/promptBuilders.ts` (riso, blobby-gradient, maximalist-pattern, etc.).
 
-### Deploy Agent (`agent/deploy_agent.py`)
-- Runs as launchd service: `com.valuesystems.demo-builder-agent`
-- **Currently disabled** (plist moved to `~/Library/LaunchAgents/disabled/` on 2026-04-17 after it consumed Anthropic budget overnight). Re-enable by moving the plist back + `launchctl bootstrap gui/$(id -u) <plist>`.
-- Does TWO jobs despite its name:
-  1. **Deploy** — polls Supabase `demo_builder.sessions` for `deploy_status = "queued"` every 5s, runs SQL against MariaDB, pushes images via SCP, restarts POS.
-  2. **Batch submission** — polls `demo_builder.batch_queue` for `pool_discover` / `pool_extract` / `pool_modifier` / `pool_branding` / `pool_pdf` rows and submits Anthropic message batches to drain them. This is the primary Anthropic spender when the agent is running.
-- The `SEPARATION_AUDIT.md` + `REFACTOR_PLAN.md` in `agent/` describe a future state where (2) moves to `batch_pipeline.py` and is gated off in the daemon via `DEPLOY_ONLY=1`. **That refactor has not landed** — there is no `DEPLOY_ONLY` check in `deploy_agent.py` today.
-- Executes SQL via `mysql.connector` against MariaDB deploy target
-- Pushes images via SCP: data URIs decoded via `base64.b64decode()`, URLs via `requests.get()`
-- POS image dirs: `C:\Program Files\Pecan Solutions\Pecan POS\images\{Food,Background,Sidebar}\`
-- Restarts POS via PsExec (session 1, elevated, `--no-sandbox`) after deploy
-- Agent logs: `~/Library/Logs/demo-builder-agent.{log,err}`
+### Agent files (`agent/`)
+
+**`deploy_agent.py`** — launchd daemon (`com.valuesystems.demo-builder-agent`). **Currently disabled** — plist moved to `~/Library/LaunchAgents/disabled/` on 2026-04-17 after overnight Anthropic budget burn. Re-enable by moving the plist back + `launchctl bootstrap gui/$(id -u) <plist>`. When running: polls `demo_builder.sessions` for `deploy_status='queued'` every 5s; on match executes SQL via `mysql.connector`, pushes images via SCP (data URIs + URLs both handled), restarts POS via PsExec (session 1, elevated, `--no-sandbox`). No Anthropic calls, no batch logic. Logs: `~/Library/Logs/demo-builder-agent.{log,err}`.
+
+**`batch_pipeline.py`** — CLI-only, **never a daemon**. Subcommands: `run-staged` (one tick of discover→extract→modifier→branding→assemble), `retry-failed` (stub — not implemented), `dry-run` (watched run via `dryrun_staged.py` against `TRACKED_IDS`). Uses Anthropic Messages Batches API (Haiku 4.5) with prompt caching. Spends money — operator must invoke manually. Wave constants: `WAVE_MIN_SIZE=20`, `WAVE_MAX_SIZE=40`, `FORCE_WAVE_AFTER_SECONDS=1800`. See `agent/rebuild_batch.py` for bulk preflight+rebuild.
+
+**`pipeline_shared.py`** — shared primitives imported by both. Supabase REST client, env load, URL classifiers, HTML/curl fetchers, ld+json extractors, menu-URL discovery. No wave logic, no POS/SSH/MariaDB.
 
 ### SQL Generation (`lib/sql/deployer.ts`)
 - Always freshly generates SQL in `handleStageDeploy` — never uses stale pre-generated SQL

@@ -8,7 +8,9 @@ os.environ.setdefault("BATCH_POLL_INTERVAL_SEC", "30")
 os.environ.setdefault("FORCE_WAVE_AFTER_SECONDS", "60")
 sys.path.insert(0, os.path.dirname(__file__))
 
-import deploy_agent as da
+# Shared symbols from pipeline_shared; BATCH symbols now come from batch_pipeline.
+import pipeline_shared as ps
+import batch_pipeline as bp
 
 TRACKED_IDS = [
     "67497d18-7788-4a60-b286-7bbe225ad99a",  # Baskin-Robbins
@@ -31,7 +33,7 @@ PIPELINE_STATUSES = {
 
 def snapshot():
     id_list = ",".join(f'"{x}"' for x in TRACKED_IDS)
-    rows = da.supabase_get(
+    rows = ps.supabase_get(
         "batch_queue",
         params={
             "id": f"in.({id_list})",
@@ -62,7 +64,7 @@ def all_terminal(rows):
 
 
 def main():
-    print(f"Dry run: WAVE_MIN_SIZE={da.WAVE_MIN_SIZE} FORCE_WAVE_AFTER_SECONDS={da.FORCE_WAVE_AFTER_SECONDS}")
+    print(f"Dry run: WAVE_MIN_SIZE={bp.WAVE_MIN_SIZE} FORCE_WAVE_AFTER_SECONDS={bp.FORCE_WAVE_AFTER_SECONDS}")
     start = time.time()
     MAX_MINUTES = 45
     tick = 0
@@ -70,8 +72,8 @@ def main():
         tick += 1
         print(f"\n━━━━━━━━━━ tick {tick} ━━━━━━━━━━")
         try:
-            da.run_staged_pipeline()
-        except da._ApiLimitHit as e:
+            bp.run_staged_pipeline()
+        except ps._ApiLimitHit as e:
             print(f"[LIMIT] {e}")
         except Exception as e:
             print(f"[ERR] run_staged_pipeline: {e}")
