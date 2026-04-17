@@ -2,7 +2,7 @@
 
 import { use, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowRight, ArrowLeft } from "lucide-react";
+import { ArrowRight, ArrowLeft, Maximize2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Card, CardContent } from "@/components/ui/card";
@@ -53,6 +53,16 @@ export default function DesignPage({
           >
             <ArrowLeft className="h-4 w-4" />
             Back to Extract
+          </Button>
+          <Button
+            variant="outline"
+            onClick={() => window.open(`/preview/${id}`, "_blank")}
+            className="gap-2"
+            disabled={items.length === 0}
+            title="Open fullscreen POS preview in a new tab"
+          >
+            <Maximize2 className="h-4 w-4" />
+            Fullscreen Preview
           </Button>
           <Button
             onClick={() => router.push(`/project/${id}/deploy`)}
