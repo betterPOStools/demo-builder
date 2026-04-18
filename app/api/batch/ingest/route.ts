@@ -9,7 +9,7 @@
 
 import { put } from "@vercel/blob";
 import { createServerClient } from "@/lib/supabase/server";
-import { buildDesignConfig } from "@/lib/batch/buildDesignConfig";
+import { buildDesignConfig, buildDesignState } from "@/lib/batch/buildDesignConfig";
 import { parseDesignConfig } from "@/lib/sql/designParser";
 import { generateFullDeployment } from "@/lib/sql/deployer";
 import type { RestaurantType } from "@/lib/types/batch";
@@ -96,14 +96,17 @@ export async function POST(request: Request): Promise<Response> {
       items: extraction.items as MenuItemsPayload["items"],
     };
 
-    const designConfig = buildDesignConfig({
+    const buildOpts = {
       payload,
       restaurantType,
       applyTypePalette: true,
       aiModifierTemplates: modifier.modifierTemplates,
       aiItemTemplateMap: modifier.itemTemplateMap,
       brandingOverride: branding ?? undefined,
-    });
+    };
+
+    const designConfig = buildDesignConfig(buildOpts);
+    const designStateNodes = buildDesignState(buildOpts);
 
     const parsed = parseDesignConfig(designConfig);
     if (parsed.errors.length > 0) {
@@ -146,6 +149,17 @@ export async function POST(request: Request): Promise<Response> {
       }),
     );
 
+    const designStateBlob = {
+      groups: designStateNodes.groups,
+      items: designStateNodes.items,
+      rooms: designStateNodes.rooms,
+      branding: designStateNodes.branding,
+      designOrigin: {
+        type: "menu_import" as const,
+        importedAt: new Date().toISOString(),
+      },
+    };
+
     const { error: sessionErr } = await supabase.from("sessions").insert({
       id: sessionId,
       user_email: "aaron@valuesystemspos.com",
@@ -155,6 +169,9 @@ export async function POST(request: Request): Promise<Response> {
       pt_record_id: job.pt_record_id,
       generated_sql: deployment.sql,
       pending_images: pendingImages,
+      design_state: designStateBlob,
+      modifier_templates: designStateNodes.modifierTemplates,
+      extracted_rows: extraction.items,
       deploy_status: "idle",
       deploy_target: null,
       current_step: 3,

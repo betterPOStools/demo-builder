@@ -299,7 +299,29 @@ function assignAiModifiers(
   return { items: wiredItems, modifierTemplates: Array.from(templatesByName.values()) };
 }
 
-export function buildDesignConfig(opts: BuildDesignConfigOptions): DesignConfigV2 {
+// Minimal BrandingState shape — must match store/designSlice.BrandingState exactly,
+// since the /api/sessions design_state blob is what Zustand's hydrateFromSession reads.
+interface BrandingStateLite {
+  background: string | null;
+  background_picture: string | null;
+  buttons_background_color: string | null;
+  buttons_font_color: string | null;
+  sidebar_picture: string | null;
+}
+
+export interface BuildDesignStateResult {
+  groups: GroupNode[];
+  items: ItemNode[];
+  rooms: RoomNode[];
+  branding: BrandingStateLite;
+  modifierTemplates: ModifierTemplateNode[];
+  restaurantName: string;
+  restaurantType: RestaurantType;
+}
+
+export function buildDesignState(
+  opts: BuildDesignConfigOptions,
+): BuildDesignStateResult {
   const typePreset = TYPE_PRESETS[opts.restaurantType];
   const layoutKey = opts.layoutKey ?? typePreset.layoutKey;
   const templateKeys = opts.templateKeys ?? typePreset.templateKeys;
@@ -316,9 +338,41 @@ export function buildDesignConfig(opts: BuildDesignConfigOptions): DesignConfigV
       : assignModifiers(groups, rawItems, templateKeys);
   const rooms = loadRooms(layoutKey);
 
+  const palette = opts.applyTypePalette
+    ? RESTAURANT_TYPE_PALETTES[opts.restaurantType]
+    : null;
+  const override = opts.brandingOverride ?? {};
+
+  const branding: BrandingStateLite = {
+    background: override.background_color ?? null,
+    background_picture: null,
+    buttons_background_color:
+      override.buttons_background_color ??
+      palette?.buttons_background_color ??
+      null,
+    buttons_font_color:
+      override.buttons_font_color ?? palette?.buttons_font_color ?? null,
+    sidebar_picture: null,
+  };
+
+  return {
+    groups,
+    items,
+    rooms,
+    branding,
+    modifierTemplates,
+    restaurantName: opts.payload.restaurant_name ?? "",
+    restaurantType: opts.restaurantType,
+  };
+}
+
+export function buildDesignConfig(opts: BuildDesignConfigOptions): DesignConfigV2 {
+  const { groups, items, rooms, modifierTemplates, restaurantName } =
+    buildDesignState(opts);
+
   const state = {
     ...createEmptyDesignState(),
-    restaurantName: opts.payload.restaurant_name ?? "",
+    restaurantName,
     restaurantType: opts.restaurantType,
     groups,
     items,
