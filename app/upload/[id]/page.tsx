@@ -210,7 +210,6 @@ export default function MobileUploadPage({
           type="file"
           accept="image/*"
           capture="environment"
-          multiple
           className="hidden"
           onChange={(e) => { addFiles(e.target.files); e.target.value = ""; }}
         />

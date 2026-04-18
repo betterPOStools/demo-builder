@@ -1,11 +1,90 @@
 # Agent Tools
 
+## rebuild_batch.py
+
+**Path:** `agent/rebuild_batch.py`
+**Purpose:** Single-shot replacement for the wave-based staged pipeline in `deploy_agent.py`. Classifies every `batch_queue` row mechanically (URL class + content gate + cached ld+json + cached branding tokens) before any AI call, and projects total cost so it can be approved/rejected up front.
+
+**What it achieves:** When run with `--dry-run`, populates `batch_queue.preflight` (JSONB) and `rebuild_run_id` for every selected row, prints bucket counts (url_class, content_gate, ai_needed), and reports projected AI spend using per-stage batch-API rates. PR3 will add real AI batch submission. PR1 (current) is dry-run only — non-`--dry-run` invocations exit 2.
+
+**Inputs / env vars (inherited from deploy_agent's `.env`):**
+
+| Var | Required | Purpose |
+|-----|----------|---------|
+| `SUPABASE_URL` | ✅ | Supabase DEV project URL |
+| `SUPABASE_KEY` | ✅ | Service role key (R+W on `demo_builder.batch_queue`) |
+
+**CLI flags:**
+
+| Flag | Default | Purpose |
+|------|---------|---------|
+| `--dry-run` | — | Required in PR1. Not passing it hard-errors with exit 2. |
+| `--status-filter done,failed,queued` | all | Only classify rows in these statuses. |
+| `--run-id RUN` | auto (`dry-YYYYMMDDTHHMMSS-abc123`) | Tag for this batch of preflight verdicts. Lets dry-runs not collide. |
+| `--workers 24` | 24 | Parallel preflight workers. Reduce to 16 on a slow network. |
+| `--fetch` | off | Re-fetch homepage/menu via curl_cffi if `raw_text`/`homepage_html` missing. Slow (minutes for 1598 rows); off by default for fast-path smoke runs. |
+| `--limit N` | — | Cap row count, useful for small smoke runs before the full sweep. |
+
+**Key functions:**
+
+### `classify_url(url: str) -> UrlClass`
+
+Pure-string URL classifier. No network. Expands `deploy_agent._classify_dead_url` (which only handled social) to also distinguish hotel-aggregator landings, PDFs, and direct image URLs. Return values drive stage dispatch in PR3 (`pdf` → Sonnet PDF batch, `direct_image` → Sonnet image batch, `social_dead`/`hotel_dead`/`unreachable` → no AI rescue, `html` → normal extract path).
+
+### `_classify_content_gate(text: str) -> ContentGate`
+
+Replaces `deploy_agent._classify_extract_skip` with relaxed thresholds. The old gate hard-failed at <500 chars; on the 2026-04-15 rebuild, 23% of those failures (36/158) succeeded when retried — it was false-positiving on genuinely short valid pages. New thresholds (see `REFACTOR_PLAN.md` §2):
+
+| Verdict | Trigger | Disposition |
+|---------|---------|-------------|
+| `hard_fail` | <200 chars AND <30 tokens | No AI call (dead page) |
+| `sparse` | 200–500 chars | Tagged, still sent to AI |
+| `nav_heavy` | nav_ratio>0.35 AND <3K chars | Tagged, still sent to AI |
+| `no_price` | no prices AND >3K chars | Tagged, still sent to AI |
+| `ok` | default | Normal extract path |
+
+### `preflight_row(row, fetch=False) -> PreflightVerdict`
+
+Per-row mechanical classifier. Pure-mechanical — no AI. Returns a `PreflightVerdict` carrying `url_class`, `fetch_status`, `ldjson_items`, `branding_tokens`, `image_menu_urls`, `content_gate_verdict`, and `ai_needed` (list of AI stages still needed). `fetch=False` (default) classifies using `batch_queue.raw_text` + `homepage_html` cached from prior wave runs; `fetch=True` re-fetches missing pages via curl_cffi.
+
+### `_compute_ai_needed(...) -> list[AiStage]`
+
+Decides which AI stages remain for a row. Rules summary:
+- Dead URL classes or `hard_fail` content → `ai_needed=[]` (fully mechanical; skip AI entirely).
+- `pdf` / `direct_image` → Sonnet vision batch + modifier + maybe branding.
+- `html` with ≥5 ld+json items → extract is mechanical; only needs modifier + maybe branding.
+- `html` with `image_menu_urls` + sparse page → Sonnet image batch + modifier + maybe branding.
+- `html` otherwise → maybe discover + extract + modifier + maybe branding.
+
+### `project_cost(verdicts) -> (counts, total_usd)`
+
+Sums per-stage request counts × `COST_PER_REQ_USD` to project total spend. Per-stage rates (from 2026-04-16 actuals — see `memory/feedback_output_tokens_dominate_batch_cost.md`): discover $0.0020, extract $0.0031, modifier $0.0028, branding $0.0015, pdf $0.0250, image_menu $0.0220.
+
+**Constraints & iteration history:**
+
+- **Why single-shot vs daemon:** The wave-based scheduler in `deploy_agent.py` was designed for steady-state throughput (trickle of new PT leads). Bulk rebuilds (1598 rows) forced through a streaming scheduler caused cache creation events to outpace cache reads (<3× amortization on Sonnet), resulting in higher cost than per-row sync calls would have been. See `memory/feedback_batch_caching_cost_regression.md`. Single-shot design amortizes one cache-creation event across 1000+ rows.
+- **Why dry-run enforced in PR1:** Before shipping any submission code, we need retroactive validation that preflight bucket counts match observed 2026-04-15 outcomes within ±3%. Letting PR1 submit batches would conflate "preflight is correct" with "submission is correct." See `REFACTOR_PLAN.md` §4 PR sequence.
+- **Why import from `deploy_agent` (not `pipeline_shared`):** PR2 is the shared-module extraction. For PR1 we import `_extract_ldjson_menu_text`, `_fetch_homepage_html`, `_extract_branding_mechanical`, `fetch_page_text_curl_cffi` from `deploy_agent` directly. Module-level side effects of `deploy_agent` (env load, prompts load, optional Anthropic client) are tolerated for this PR; PR2 eliminates them.
+- **Why `--fetch` default off:** 1598 × ~2s fetch @ 24 workers ≈ 2 minutes on a good network, but can stall on Cloudflare-protected hosts. Default off lets first smoke runs complete in seconds using already-cached `raw_text` / `homepage_html` from prior wave runs.
+- **Rejected: inline URL classification in deploy_agent.** Would bloat `_classify_dead_url` and mix URL-class semantics with dead-URL semantics. Cleaner to rewrite into a typed `classify_url`.
+- **Rejected: a single mega-batch.** Extract needs the discovered URL; modifier needs extracted items. Dependency graph forces ~3 batch-group boundaries (discover → extract/pdf/image_menu → modifier/branding). Not one batch.
+
+**Known issues:**
+
+- `menu_url_candidate` is not auto-populated in PR1 (the mechanical `discover_menu_url` is network-heavy and lives in `deploy_agent`; PR2 moves it). Without it, more rows get flagged as needing AI `discover` than strictly necessary; the cost projection is slightly conservative as a result.
+- `image_menu_urls` is only surfaced from `extraction_result.image_menu_urls` if a prior wave ran `_detect_menu_images`. Rows that never entered the wave pipeline won't have them; PR2/PR3 will run the detector live.
+- Row PATCHes are serial-per-row (not batched). For 1598 rows × ~50ms PATCH ≈ 80 seconds at 1 worker; with 24 workers the network is the constraint. Acceptable for PR1; PR3 can bulk-upsert in chunks if needed.
+
+---
+
 ## deploy_agent.py
 
 **Path:** `agent/deploy_agent.py`  
-**Purpose:** Polls Supabase for queued deployments and executes them: runs SQL against MariaDB, pushes images via SCP, and restarts the POS.
+**Purpose:** Launchd daemon that polls Supabase for queued sessions and deploys them to the POS tablet — no batch code, no Anthropic calls.
 
-**What it achieves:** When AutoPilot stages a deploy from the browser, this agent picks it up from Supabase and delivers it to the POS tablet — executing the generated SQL, pushing branding/item images via SCP, and restarting the POS Electron app so changes take effect immediately.
+**Current status (2026-04-17):** plist moved to `~/Library/LaunchAgents/disabled/` after an overnight Anthropic budget burn (from the pre-split monolithic version). Re-enable by moving the plist back + `launchctl bootstrap gui/$(id -u) <plist>` — safe to do once PR3 `rebuild_batch.py` is in and the daemon stays batch-free (as the post-PR2 split already ensures).
+
+**What it achieves:** When the browser stages a deploy, this daemon picks it up from `demo_builder.sessions` (`deploy_status='queued'`) and delivers it to the tablet: executes the generated SQL against MariaDB, pushes branding/item images via SCP, and restarts the POS Electron app so changes take effect immediately.
 
 **Inputs / env vars (from `agent/.env`):**
 
@@ -25,78 +104,76 @@
 
 **Key functions:**
 
-### `discover_menu_url(homepage_url: str) -> dict`
+### `process_queued()`
 
-Resolves a restaurant homepage (or any URL) to an actual menu page before extraction. Returns `{"type": str, "url": str}` where `type` is one of:
+Main deploy loop. Fetches one session with `deploy_status='queued'`, atomically claims it (`deploy_status='executing'`), runs `execute_sql()` → `push_images_scp()` → `restart_pos()`, then sets `deploy_status='done'` or `'failed'`.
 
-| Type | Meaning | Dispatch |
-|------|---------|----------|
-| `ldjson` | ld+json Menu data found on the provided URL itself | Extract directly via `extract_ldjson_full_menu()` |
-| `html` | Nav link to a menu page on the same domain | Proceed with extraction on discovered URL |
-| `platform` | Menu hosted on a known platform (Toast, Square, Popmenu, etc.) | Standard pipeline on discovered URL |
-| `pdf` | Menu link resolves to a `.pdf` file | Set `batch_queue.status = 'needs_pdf'`, skip |
-| `not_found` | No credible menu link found | Fall through to extraction on original URL |
+### `push_images_scp(pending_images, ssh_host, ssh_user)`
 
-Scoring: exact path match (`/menu`, `/menus`, `/food`) > href keyword > anchor text keyword. Never throws — exceptions return `not_found`.
+Transfers each image to the POS tablet via SCP. Handles both data URIs (`base64.b64decode()`) and HTTP URLs (`requests.get()`). Writes to `POS_IMAGES_DIR\{Food,Background,Sidebar}\`.
 
-Constants used: `_MENU_HREF_KW`, `_MENU_TEXT_KW`, `_PLATFORM_HOSTS`, `_PDF_RE`.
+### `restart_pos(ssh_host, ssh_user)`
 
-### `extract_ldjson_full_menu(menu_url: str) -> str | None`
+Kills `Pecan POS.exe` via SSH + taskkill, writes a VBS launcher, then invokes PsExec `-i {session} -h -d wscript.exe` to launch the Electron app in the interactive desktop session with `--no-sandbox`. VBS is always overwritten unconditionally (prevents stale/corrupt VBS from persisting).
 
-Extracts complete menu text from schema.org `application/ld+json` blocks across all section pages. Returns merged plain text (up to 40,000 chars) or `None` if < 100 chars found.
+**Constraints & iteration history:**
 
-1. `curl_cffi GET menu_url` — parse ld+json from first page + collect same-domain `/menus/*` section URLs from HTML nav
-2. `ThreadPoolExecutor(max_workers=8)` — concurrent `curl_cffi GET` on remaining section URLs
-3. Merge all `_extract_ldjson_menu_text()` results
-4. Logs `[LD] N sections, M items`
+- **Separated from batch pipeline 2026-04-16:** The monolithic `deploy_agent.py` previously contained both the deploy daemon AND the 4-stage batch pipeline (`run_staged_pipeline`, all `advance_stage_*`, all `submit_stage_wave`, all Anthropic batch calls). Batch code was split to `batch_pipeline.py` and shared primitives to `pipeline_shared.py`. See `agent/SEPARATION_PLAN.md`.
 
-**Why:** Restaurant platforms (Popmenu, BentoBox, schema.org-compliant sites) embed full structured menu data as ld+json for SEO. Extracting this way is free (~3–5s, zero AI tokens), vs 30–90s + ~$0.03–0.05/restaurant via the AI pipeline.
+- **Why split:** Batch + prompt-caching cost regression discovered 2026-04-16 — automatic wave submission was spending Anthropic dollars without operator approval. Operator principle: "batch function should never happen automatically. they need direct intervention from me to process." A single daemon doing both meant any bug or restart could trigger AI spend without human action.
 
-**Constraint:** Only extracts from same-domain `/menus/*` section URLs. Platform sites that load menu data dynamically via XHR after page load (e.g. pure SPA menus) will return `None` and fall through to the AI pipeline. **Popmenu-specific caveat:** Section pages (`/menus/salads`, etc.) only carry `@type: Restaurant` ld+json; menu items are loaded client-side. Only the first section's items are available from the static ld+json on the main `/food-menu` page — this is still useful for demos but is not a full menu. Full coverage on Popmenu requires Playwright or the AI pipeline.
+- **Turso migration (2026-04-10) — rolled back:** Daemon was rewritten to use Turso HTTP API instead of Supabase. Network-level block — Turso endpoint unreachable from both agent and Vercel on demo-location network. Rolled back same day.
 
-### `_handle_process_result(job, jid, result, label) -> bool`
+- **JSONB timeout root cause:** Original approach stored base64 data URIs (~60KB) directly in `sessions.pending_images`. With 5–10 images, upsert hit Supabase statement timeout. Fix: stage route uploads to Vercel Blob first; agent receives URLs (~100 bytes). `push_images_scp()` handles both data URIs and URLs.
 
-DRY helper — given a process-route response `result` dict, calls `save_snapshot()` on success and marks the job failed on error. Returns `True` if the job completed successfully. `label` is a short string (`[GEN]`, `[CF]`, `[PW]`, `[LD]`) used in log output. Eliminates duplicate success/failure handling across the four dispatch paths in `process_generate_queue()`.
+- **POS restart via PsExec:** Electron crashes with `GPU process launch failed: error_code=18` when started from SSH session 0. PsExec `-i {session_id}` launches into the interactive desktop session. `--no-sandbox` allows GPU access from the remote context.
 
-### `process_generate_queue()` dispatch order
+- **VBS quoting bug (fixed 2026-04-10):** `&&` separator ended up outside `WshShell.Run` string — POS was killed but never restarted. Fixed by single-string command.
 
+- **Schema headers required:** All Supabase requests must include `Accept-Profile: demo_builder` and `Content-Profile: demo_builder` headers.
+
+**Known issues:**
+- `execute_sql` splits on `;` — would break if generated SQL contained semicolons inside string literals. Low risk (machine-generated SQL).
+- `deploy_agent_local.py` is an older variant for local MariaDB; keep as reference, do not develop.
+
+---
+
+## batch_pipeline.py
+
+**Path:** `agent/batch_pipeline.py`  
+**Purpose:** CLI-only operator tool that runs one tick of the staged AI batch pipeline (discover→extract→modifier→branding→assemble) against `demo_builder.batch_queue`. Never runs as a daemon.
+
+**What it achieves:** Advances `batch_queue` rows through the 4-stage pipeline by submitting Anthropic Messages Batch API requests (Haiku 4.5 for extract/modifier/branding, Sonnet 4.6 for PDF/image menus) with prompt caching, polling for results, and assembling completed rows into sessions. One invocation = one tick; repeated ticks require repeated manual invocations (or a shell loop).
+
+**Subcommands:**
 ```
-For each queued job:
-1. Claim → status = "processing"
-2. discover_menu_url(menu_url)
-   → pdf:       PATCH status = "needs_pdf", continue
-   → other:     use discovered URL; PATCH menu_url if different
-3. extract_ldjson_full_menu(menu_url)
-   → text:      POST /api/batch/process with {queue_id, raw_text}  [LD path]
-   → None:      fall through
-4. POST /api/batch/process with {queue_id}                         [GEN path — Vercel fetches URL]
-   → success:   save_snapshot, done
-   → CF/JS err: fall through
-5. curl_cffi fetch → POST with {queue_id, raw_text}                [CF path]
-   → success:   save_snapshot, done
-   → fail:      fall through
-6. Playwright fetch → POST with {queue_id, raw_text}               [PW path]
-   → CF detected: fail
-   → success:   save_snapshot, done
-   → fail:      mark failed
+python3 agent/batch_pipeline.py run-staged   # one tick of all stages
+python3 agent/batch_pipeline.py dry-run      # watched run via dryrun_staged.py against TRACKED_IDS
+python3 agent/batch_pipeline.py retry-failed # not implemented — use rebuild_batch.py
 ```
 
-### `needs_pdf` status lifecycle
+**Inputs / env vars (from `agent/.env`):**
 
-Set by `advance_stage_discover()` when `discover_menu_url()` returns `type = "pdf"`. The agent PATCHes `menu_url` with the actual PDF URL (not the homepage URL — this was a bug fixed in commit `b3d99b0`) and `status = "needs_pdf"`.
+| Var | Required | Purpose |
+|-----|----------|---------|
+| `SUPABASE_URL` | ✅ | Supabase project REST URL |
+| `SUPABASE_KEY` | ✅ | Service role key (R+W on `demo_builder.batch_queue` + `sessions`) |
+| `ANTHROPIC_API_KEY` | ✅ | For Haiku/Sonnet batch submissions |
+| `WAVE_MIN_SIZE` | — | Min rows before a wave is submitted (default 20) |
+| `WAVE_MAX_SIZE` | — | Max rows per wave (default 40) |
+| `FORCE_WAVE_AFTER_SECONDS` | — | Submit even if below min size after this delay (default 1800) |
+| `BATCH_POLL_INTERVAL_SEC` | — | Seconds between wave status polls (default 30) |
 
-**PDF pipeline (shipped `dae4197`):** `advance_stage_pdf()` picks up `needs_pdf` rows, validates `".pdf" in menu_url.lower()` (guard added `0571dd4`), and moves them to `pool_pdf`. `_submit_pdf_wave()` submits to Anthropic batch with Sonnet 4.6 document blocks. `_poll_pdf_waves()` drains results → `extraction_result` → `ready_for_modifier`.
-
-### 4-stage batch pipeline functions
+**Key functions (all moved here from the former monolithic deploy_agent.py):**
 
 `run_staged_pipeline()` orchestrates:
 
 | Function | Input status | Output status | AI? |
 |----------|-------------|---------------|-----|
-| `advance_stage_discover()` | `queued` | `discovering` → `ready_for_extract` / `pool_discover` / `needs_pdf` / `failed` | No (mechanical nav scoring + AI fallback) |
-| `advance_stage_extract()` | `ready_for_extract` | `extracting` → `ready_for_modifier` / `pool_extract` / `failed` | No (ld+json mechanical; AI on raw_text fallback) |
+| `advance_stage_discover()` | `queued` | `discovering` → `ready_for_extract` / `pool_discover` / `needs_pdf` / `failed` | No (mechanical + AI fallback) |
+| `advance_stage_extract()` | `ready_for_extract` | `extracting` → `ready_for_modifier` / `pool_extract` / `failed` | No (ld+json mechanical; AI fallback) |
 | `advance_stage_modifier()` | `ready_for_modifier` | `pool_modifier` or `ready_for_branding` | No |
-| `advance_stage_branding()` | `ready_for_branding` | `pool_branding` or `ready_to_assemble` | No (mechanical theme-color / CSS var extraction) |
+| `advance_stage_branding()` | `ready_for_branding` | `pool_branding` or `ready_to_assemble` | No (mechanical CSS-var extraction) |
 | `advance_stage_pdf()` | `needs_pdf` | `pool_pdf` | No |
 | `advance_stage_assemble()` | `ready_to_assemble` | `assembling` → `done` / `failed` | No (POST `/api/batch/ingest`) |
 | `_submit_pdf_wave()` | `pool_pdf` | `batch_pdf_submitted` | **Sonnet 4.6 vision** |
@@ -104,39 +181,54 @@ Set by `advance_stage_discover()` when `discover_menu_url()` returns `type = "pd
 | `submit_stage_wave(stage, ...)` | `pool_*` | `batch_*_submitted` | **Haiku 4.5** |
 | `poll_stage_waves(stage, ...)` | `batch_*_submitted` | next stage or `failed` | — |
 
-**Wave constants:** `WAVE_MIN_SIZE=20`, `WAVE_MAX_SIZE=40`, `FORCE_WAVE_AFTER_SECONDS=1800`.
+**Constraints & iteration history:**
 
-### `_fetch_homepage_html(url, max_chars)`
+- **CLI-only — never a daemon.** Enforced by design: the module only does work when invoked as `__main__`. The launchd plist (`com.valuesystems.demo-builder-agent`) runs `deploy_agent.py` exclusively. Running `batch_pipeline.py` under launchd would cause automatic AI spend without operator approval.
 
-Fetches homepage HTML via curl_cffi, strips Cloudflare detection phrases, and returns trimmed HTML. **Strips all PostgreSQL-incompatible control characters** before storage — null bytes and other control chars (`\x00`–`\x08`, `\x0b`, `\x0c`, `\x0e`–`\x1f`) cause HTTP 400 on Supabase PATCH:
-```python
-html = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", html)[:max_chars]
-```
-Same stripping applied to `raw_text` in `advance_stage_extract()`.
+- **Operator principle:** "the batch function should never happen automatically. they need direct intervention from me to process." (2026-04-16, verbatim). This is the architectural axiom for the separation.
 
-**Symptom of missing strip:** `[POLL] Unhandled error (#1): 400 Client Error: Bad Request` repeating for the same row indefinitely (row gets claimed → PATCH fails → stays in `discovering`/`extracting` → re-claimed next cycle).
+- **Batch+cache cost regression (2026-04-16):** When batch + prompt-caching were wired into the always-on daemon, cache-creation events outpaced cache reads on the 2026-04-15 rebuild (1598 rows, ~50 waves). Batch+cache cost MORE than per-row synchronous calls would have. Separation prevents auto-spend and gives the operator cost visibility before each run.
+
+- **Split from deploy_agent.py 2026-04-16:** All `run_staged_pipeline()`, `advance_stage_*()`, `submit_stage_wave()`, `poll_stage_waves()`, `_submit_pdf_wave()`, `_poll_pdf_waves()`, and all Anthropic client code were extracted from `deploy_agent.py` into this file. Shared mechanics (HTTP fetchers, ld+json parsers, URL classifiers) went to `pipeline_shared.py`.
+
+- **`needs_pdf` lifecycle:** `advance_stage_discover()` sets `status='needs_pdf'` + patches `menu_url` with the actual PDF URL. `advance_stage_pdf()` validates `".pdf" in menu_url.lower()` before moving to `pool_pdf`. `_submit_pdf_wave()` submits to Anthropic batch with Sonnet 4.6 document blocks.
+
+- **process_generate_queue removed:** The old sync per-row pipeline that ran alongside the batch pipeline (causing hidden spend invisible to `/v1/messages/batches`) was not ported to this file. Batch-only.
+
+**Known issues:**
+- `retry-failed` subcommand is stubbed — exits 1 with a message. Use `rebuild_batch.py` for retries.
+- No looping built in — `run-staged` is a single tick. Operator wraps in a shell loop or runs manually.
 
 ---
 
+## pipeline_shared.py
+
+**Path:** `agent/pipeline_shared.py`  
+**Purpose:** Shared primitives (Supabase client, env load, URL classifiers, HTML/curl fetchers, ld+json extractors, menu-URL discovery) imported by both `deploy_agent.py` and `batch_pipeline.py`.
+
+**What it achieves:** Provides a single source of truth for all mechanical helpers so that changes to fetcher behavior, control-char stripping, URL classification, or ld+json parsing apply to both the daemon and the batch CLI without duplication.
+
+**Inputs / env vars:** Same `.env` file as the other agents — `SUPABASE_URL`, `SUPABASE_KEY`, `ANTHROPIC_API_KEY`. Module loads env at import time.
+
+**Key exports:**
+- Supabase REST helpers: `supabase_get`, `supabase_patch`, `HEADERS`, `SUPABASE_URL`, `SUPABASE_KEY`
+- HTTP fetchers: `fetch_page_text_curl_cffi`, `fetch_page_text_playwright`, `_fetch_homepage_html`
+- ld+json: `_extract_ldjson_menu_text`, `extract_ldjson_full_menu`, `_ldjson_items_to_rows`
+- Menu discovery: `discover_menu_url`, `discover_menu_url_ai`, `_extract_menu_index_links`, `_detect_menu_images`
+- URL classifiers/constants: `_CF_PHRASES`, `_MENU_HREF_KW`, `_MENU_TEXT_KW`, `_PLATFORM_HOSTS`, `_PDF_RE`, `_COMMON_MENU_PATHS`
+
 **Constraints & iteration history:**
 
-- **Turso migration (2026-04-10) — rolled back:** Agent was rewritten to use Turso HTTP API (`/v2/pipeline`) instead of Supabase. Hit a network-level block — Turso endpoint was unreachable from both the agent and Vercel edge functions on the demo location network. Rolled back to Supabase within the same day.
+- **Extracted 2026-04-16 (lift-and-shift):** All contents were copied verbatim from `deploy_agent.py` — no behavior changes during extraction. See `agent/SEPARATION_AUDIT.md` for the full classification of every symbol.
 
-- **JSONB timeout root cause:** Original Supabase approach stored base64 image data URIs (~60KB each) directly in the `sessions.pending_images` JSONB column. With 5–10 images, the upsert payload exceeded Supabase statement timeout limits and killed the PROD project. Fix: the stage route now uploads images to Vercel Blob first; the agent receives URLs (~100 bytes) instead of raw bytes. Agent's `push_images_scp()` handles both data URIs and URLs.
+- **No wave logic, no POS/SSH/MariaDB, no stage orchestration.** Anything that touches the batch pipeline state machine or the POS tablet stays in `batch_pipeline.py` or `deploy_agent.py` respectively.
 
-- **POS restart via PsExec:** SSH + taskkill + PsExec is required because Electron crashes with `GPU process launch failed: error_code=18` when started from SSH session 0. PsExec `-i {session_id}` launches into the interactive desktop session. VBS wrapper hides the cmd.exe window. `--no-sandbox` allows GPU access from the remote session context. See parent CLAUDE.md for full pattern.
+- **PostgreSQL control-char stripping in `_fetch_homepage_html`:** Null bytes and control chars (`\x00`–`\x08`, `\x0b`, `\x0c`, `\x0e`–`\x1f`) cause HTTP 400 on Supabase PATCH. Stripping is applied before any Supabase write. Symptom of missing strip: `[POLL] Unhandled error (#1): 400 Client Error` repeating for the same row.
 
-- **VBS quoting bug (fixed 2026-04-10):** Original VBS content was built from two Python string literals with implicit concatenation. The `&&` separator ended up outside the `WshShell.Run` string, so `cd` ran but `Pecan POS.exe` never launched — POS was killed but not restarted. Fixed by keeping the full command in a single string. Now always unconditionally overwrites the VBS on every restart (`deploy_restart_script`) rather than checking existence, so a corrupt VBS can never persist.
-
-- **Session ID detection:** `query session` exits non-zero on some Windows builds and may write to stderr. Agent parses both stdout and stderr regardless of return code, defaults to session 1.
-
-- **Schema headers required:** All Supabase requests must include `Accept-Profile: demo_builder` and `Content-Profile: demo_builder` headers, or PostgREST defaults to `public` schema.
-
-- **Supabase schema permissions (2026-04-10):** `demo_builder` schema was created and exposed to PostgREST but `GRANT USAGE` and `GRANT ALL ON TABLES` were never run for `anon/authenticated/service_role`. Every API call returned `permission denied for schema demo_builder`. Fixed via Supabase MCP.
+- **`rebuild_batch.py` still imports from here** (as of 2026-04-16 PR1). Prior to the separation, `rebuild_batch.py` imported directly from `deploy_agent.py` and tolerated the daemon's module-level side effects.
 
 **Known issues:**
-- `execute_sql` splits on `;` — would break if generated SQL contained semicolons inside string literals. Low risk (machine-generated SQL), but not robust.
-- `deploy_agent_local.py` is an older variant for local MariaDB; keep as reference, do not develop.
+- `pipeline_shared.py` docstring still mentions `rebuild_batch.py` as a future importer — now current.
 
 ---
 

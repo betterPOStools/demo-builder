@@ -42,7 +42,7 @@ interface BrandingResult {
 }
 
 export async function POST(request: Request): Promise<Response> {
-  const body = (await request.json()) as { queue_id?: string };
+  const body = (await request.json()) as { queue_id?: string; rebuild_run_id?: string };
   if (!body.queue_id) {
     return Response.json({ error: "Missing queue_id" }, { status: 400 });
   }
@@ -66,6 +66,32 @@ export async function POST(request: Request): Promise<Response> {
     );
   }
 
+  // §2.4 mid-deploy collision guard — do NOT overwrite a session that the
+  // deploy agent has already picked up. Check BEFORE any work so the 409
+  // is cheap and no partial state leaks.
+  if (job.pt_record_id) {
+    const { data: existing, error: existingErr } = await supabase
+      .from("sessions")
+      .select("id, deploy_status")
+      .eq("pt_record_id", job.pt_record_id)
+      .maybeSingle();
+    if (existingErr) {
+      console.warn("[batch/ingest] deploy_status preflight lookup failed:", existingErr.message);
+    } else if (
+      existing?.deploy_status &&
+      (existing.deploy_status === "queued" || existing.deploy_status === "executing")
+    ) {
+      return Response.json(
+        {
+          error: "deploy_in_flight",
+          deploy_status: existing.deploy_status,
+          session_id: existing.id,
+        },
+        { status: 409 },
+      );
+    }
+  }
+
   try {
     const extraction = (job.extraction_result ?? {}) as ExtractionResult;
     const modifier = (job.modifier_result ?? {}) as ModifierResult;
@@ -75,16 +101,22 @@ export async function POST(request: Request): Promise<Response> {
       throw new Error("No items in extraction_result — stage 2 did not complete");
     }
 
+    // §2.7 restaurant_type coercion: accept any legitimate restaurant —
+    // off-list AI outputs coerce to "other" here rather than re-calling the
+    // model. Upstream filtering handles hotels/gas-stations/etc.
     const VALID_TYPES: RestaurantType[] = [
       "pizza", "bar_grill", "fine_dining", "cafe", "fast_casual", "fast_food",
       "breakfast", "mexican", "asian", "seafood", "other",
     ];
     const extractedType = extraction.restaurantType as string | undefined;
-    const restaurantType = (
+    const jobType = job.restaurant_type as string | undefined;
+    const restaurantType: RestaurantType = (
       extractedType && VALID_TYPES.includes(extractedType as RestaurantType)
-        ? extractedType
-        : (job.restaurant_type ?? "other")
-    ) as RestaurantType;
+        ? (extractedType as RestaurantType)
+        : jobType && VALID_TYPES.includes(jobType as RestaurantType)
+          ? (jobType as RestaurantType)
+          : "other"
+    );
 
     const payload: MenuItemsPayload = {
       version: "1.0",
@@ -124,7 +156,26 @@ export async function POST(request: Request): Promise<Response> {
       rooms: parsed.rooms,
     });
 
-    const sessionId = crypto.randomUUID();
+    // §2.4 idempotent upsert: re-use the existing session row for this
+    // pt_record_id. Rebuild retries + --recover-review re-runs converge
+    // on the same session_id + the same Blob paths (keyed by sessionId),
+    // so no duplicate blobs accumulate.
+    let sessionId: string | null = null;
+    if (job.pt_record_id) {
+      const { data: existing, error: existingErr } = await supabase
+        .from("sessions")
+        .select("id")
+        .eq("pt_record_id", job.pt_record_id)
+        .maybeSingle();
+      if (existingErr) {
+        console.warn("[batch/ingest] session preflight lookup failed:", existingErr.message);
+      } else if (existing?.id) {
+        sessionId = existing.id;
+      }
+    }
+    if (!sessionId) {
+      sessionId = crypto.randomUUID();
+    }
 
     const pendingImages = await Promise.all(
       deployment.pendingImageTransfers.map(async (img) => {
@@ -137,9 +188,12 @@ export async function POST(request: Request): Promise<Response> {
           const mime = meta.match(/data:([^;]+)/)?.[1] ?? "image/png";
           const ext = mime.split("/")[1] ?? "png";
           const buf = Buffer.from(b64, "base64");
+          // `allowOverwrite: true` so retries overwrite same blob path
+          // rather than creating duplicates.
           const blob = await put(`deploy/${sessionId}/${img.name}.${ext}`, buf, {
             access: "public",
             contentType: mime,
+            allowOverwrite: true,
           });
           return { ...base, image_url: blob.url };
         } catch (blobErr) {
@@ -160,7 +214,7 @@ export async function POST(request: Request): Promise<Response> {
       },
     };
 
-    const { error: sessionErr } = await supabase.from("sessions").insert({
+    const sessionRow = {
       id: sessionId,
       user_email: "aaron@valuesystemspos.com",
       name: job.name,
@@ -175,10 +229,13 @@ export async function POST(request: Request): Promise<Response> {
       deploy_status: "idle",
       deploy_target: null,
       current_step: 3,
-    });
+    };
+    const { error: sessionErr } = await supabase
+      .from("sessions")
+      .upsert(sessionRow, { onConflict: "id" });
 
     if (sessionErr) {
-      throw new Error(`Session insert failed: ${sessionErr.message}`);
+      throw new Error(`Session upsert failed: ${sessionErr.message}`);
     }
 
     await supabase

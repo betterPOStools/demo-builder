@@ -6,7 +6,7 @@ const ALLOWED_ORIGINS = [
   'capacitor://localhost',   // Capacitor legacy
   'http://localhost',
   'http://localhost:5176',
-  'http://100.118.51.78:5176',
+  'http://100.73.220.32:5176',
 ]
 
 export default function proxy(req: NextRequest) {

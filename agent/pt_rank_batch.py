@@ -27,11 +27,25 @@ from pathlib import Path
 
 warnings.filterwarnings("ignore")
 
-import anthropic
+import anthropic  # noqa: F401 — retained for type compatibility / SDK types
 import requests
 from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).parent / ".env")
+
+# Batch-governor client shims. The governor + calc_tokens packages are
+# siblings under ``batch-governor/clients/python/`` and are re-exported via
+# ``clients.python.*`` inside their own ``__init__.py`` — add BOTH the repo
+# root and the ``clients/python`` dir to sys.path so short imports resolve.
+_BATCH_GOVERNOR_ROOT = "/Users/nomad/Projects/betterpostools/batch-governor"
+if _BATCH_GOVERNOR_ROOT not in sys.path:
+    sys.path.insert(0, _BATCH_GOVERNOR_ROOT)
+_BATCH_GOVERNOR_PY_CLIENTS = f"{_BATCH_GOVERNOR_ROOT}/clients/python"
+if _BATCH_GOVERNOR_PY_CLIENTS not in sys.path:
+    sys.path.insert(0, _BATCH_GOVERNOR_PY_CLIENTS)
+
+from governor import Anthropic  # drop-in subclass; routes batches through :5185
+from calc_tokens import CalcTokensClient  # cost projection + calibration client
 
 sys.path.insert(0, str(Path(__file__).parent))
 from pt_rank_prototype import MODEL
@@ -122,7 +136,10 @@ def prepare_prospects(limit=None, only_missing=False, require_place_id=True):
 def submit_batch(prospects):
     print(f"[submit] building {len(prospects)} requests")
     requests_list = [build_request(p) for p in prospects]
-    client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+    # AI: Haiku 4.5 batch ranker. Routes through batch-governor :5185 which
+    # applies pre-submit gate (batch-size cap, per-submit cap, dedup, model
+    # allowlist) before calling Anthropic's batches API. Fail-open per ADR-005.
+    client = Anthropic(app="demo-builder-pt-rank", api_key=ANTHROPIC_KEY)
     batch = client.messages.batches.create(requests=requests_list)
     state = load_state()
     state["batch_id"] = batch.id
@@ -223,6 +240,39 @@ def ingest_results(batch_id, prospects_by_pid):
             print(f"[ingest] upsert failed {r.status_code}: {r.text[:500]}")
             return
         print(f"[ingest] ✓ upserted {i + len(chunk)}/{len(rows_to_upsert)}")
+
+    # BUSINESS RULE: every run must feed the calculator's per-operation
+    # reservoir so future projections converge on truth (ADR-001). Aggregate
+    # actual token usage + derive cost via the calc service pricing table.
+    try:
+        total_input = sum((row.get("input_tokens") or 0) for row in rows_to_upsert)
+        total_output = sum((row.get("output_tokens") or 0) for row in rows_to_upsert)
+        total_cache_read = sum((row.get("cache_read_tokens") or 0) for row in rows_to_upsert)
+        calc = CalcTokensClient()
+        pricing = calc.getPricingTable().get(MODEL)
+        if pricing is not None and rows_to_upsert:
+            actual_cost_usd = (
+                total_input * pricing["input_per_token"]
+                + total_output * pricing["output_per_token"]
+                + total_cache_read * pricing["cache_read_per_token"]
+            )
+            # Feed P50/P95/P99 reservoir with per-request averages so the
+            # reservoir holds realistic per-request distribution, not batch sums.
+            n = len(rows_to_upsert)
+            calc.calibrateWithActualUsage({
+                "operation": "pt-rank",
+                "model": MODEL,
+                "actual_input": int(total_input / n) if n else 0,
+                "actual_output": int(total_output / n) if n else 0,
+                "actual_cost_usd": float(actual_cost_usd / n) if n else 0.0,
+            })
+            print(
+                f"[calibrate] ✓ operation=pt-rank model={MODEL} "
+                f"total_in={total_input} total_out={total_output} "
+                f"total_cost=${actual_cost_usd:.4f}"
+            )
+    except Exception as exc:  # calibration failure must never break ingest
+        print(f"[calibrate] skipped (governor unreachable?): {exc}")
 
 
 def main():
