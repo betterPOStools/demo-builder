@@ -8,11 +8,11 @@ import {
   Loader2,
   Check,
   X,
-  Trash2,
-  Library,
   Wand2,
   ScanSearch,
   Crop,
+  Library,
+  Trash2,
 } from "lucide-react";
 import { SidebarCropTool } from "@/components/design/SidebarCropTool";
 import { Input } from "@/components/ui/input";
@@ -24,6 +24,11 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { LibraryPicker } from "@/components/ui/LibraryPicker";
+import { TemplateSelector } from "@/components/ui/TemplateSelector";
+import type { ImageLibraryEntry } from "@/lib/library/types";
+import { DEFAULT_TEMPLATE_BY_SURFACE } from "@/lib/generation/templates";
+import { searchLibrary, addToLibrary } from "@/lib/library/client";
 import { useStore } from "@/store";
 import type { SavedBrandAnalysis, GeneratedImage } from "@/store/designSlice";
 import { isLightColor, generateId } from "@/lib/utils";
@@ -231,8 +236,8 @@ export function BrandingEditor() {
   const restaurantName = useStore((s) => s.restaurantName);
   const restaurantType = useStore((s) => s.restaurantType);
   const groups = useStore((s) => s.groups);
-  const imageLibrary = useStore((s) => s.imageLibrary);
   const addGeneratedImage = useStore((s) => s.addGeneratedImage);
+  const imageLibrary = useStore((s) => s.imageLibrary);
   const deleteGeneratedImage = useStore((s) => s.deleteGeneratedImage);
   const brandAnalyses = useStore((s) => s.brandAnalyses);
   const saveBrandAnalysis = useStore((s) => s.saveBrandAnalysis);
@@ -255,6 +260,45 @@ export function BrandingEditor() {
   const [analyzing, setAnalyzing] = useState(false);
   const [brandTokens, setBrandTokens] = useState<Record<string, unknown> | null>(null);
   const [brandError, setBrandError] = useState("");
+
+  // Mechanical palette state — free extraction from homepage HTML
+  const [extractingPalette, setExtractingPalette] = useState(false);
+  const [paletteMessage, setPaletteMessage] = useState<string | null>(null);
+
+  // Template selections — route-dispatch wiring is follow-up work.
+  const [backgroundTemplate, setBackgroundTemplate] = useState(
+    DEFAULT_TEMPLATE_BY_SURFACE.background,
+  );
+  const [sidebarTemplate, setSidebarTemplate] = useState(
+    DEFAULT_TEMPLATE_BY_SURFACE.sidebar,
+  );
+
+  async function extractMechanicalPalette() {
+    if (!brandUrl.trim()) return;
+    setExtractingPalette(true);
+    setPaletteMessage(null);
+    try {
+      const res = await fetch("/api/extract-palette", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: brandUrl.trim() }),
+      });
+      const data = await res.json();
+      if (data.found && data.palette) {
+        updateBranding({
+          buttons_background_color: data.palette.buttons_background_color,
+          buttons_font_color: data.palette.buttons_font_color,
+        });
+        setPaletteMessage(`Applied ${data.palette.buttons_background_color} from site.`);
+      } else {
+        setPaletteMessage(data.reason ?? "No brand color found in page.");
+      }
+    } catch (err) {
+      setPaletteMessage(`Failed: ${(err as Error).message}`);
+    } finally {
+      setExtractingPalette(false);
+    }
+  }
 
 
   const bg = branding.background || "#0f172a";
@@ -367,32 +411,111 @@ export function BrandingEditor() {
       const quoteMatch = styleHints.match(/"([^"]+)"/);
       const quoteText = quoteMatch?.[1];
 
+      const styleHintTags = styleHints
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, " ")
+        .split(/\s+/)
+        .filter((w) => w.length > 2);
+      const libraryTags = Array.from(
+        new Set(
+          [
+            ...imageryKeywords.slice(0, 5),
+            ...textureWords.slice(0, 3),
+            ...styleHintTags,
+            restaurantType,
+            restaurantName,
+          ].filter(Boolean) as string[],
+        ),
+      ).map((t) => t.toLowerCase());
+
+      let bgUri: string | undefined;
+      let sbUri: string | undefined;
+
+      if (backgroundTemplate === "pull-from-library") {
+        try {
+          const { entries } = await searchLibrary({
+            intent: "background",
+            tags: libraryTags,
+            restaurant_type: restaurantType ?? undefined,
+            limit: 1,
+          });
+          if (entries[0]) bgUri = entries[0].public_url;
+        } catch {
+          // Silent fallback to AI generation.
+        }
+      }
+
+      if (sidebarTemplate === "pull-from-library") {
+        try {
+          const { entries } = await searchLibrary({
+            intent: "sidebar",
+            tags: libraryTags,
+            restaurant_type: restaurantType ?? undefined,
+            limit: 1,
+          });
+          if (entries[0]) sbUri = entries[0].public_url;
+        } catch {
+          // Silent fallback to AI generation.
+        }
+      }
+
+      const needBg = !bgUri;
+      const needSb = !sbUri;
+
       const [bgData, sbData] = await Promise.all([
-        fetch("/api/fetch-photo", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ keywords, backgroundPrompt, assetType: "background", hasQuoteText: false, brandTokens, width: 1024, height: 716 }),
-        }).then((r) => r.json()),
-        fetch("/api/fetch-photo", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ keywords, sidebarPrompt, assetType: "sidebar", hasQuoteText, quoteText, brandTokens, width: 360, height: 696 }),
-        }).then((r) => r.json()),
+        needBg
+          ? fetch("/api/fetch-photo", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ keywords, backgroundPrompt, assetType: "background", hasQuoteText: false, brandTokens, width: 1024, height: 716, templateId: backgroundTemplate }),
+            }).then((r) => r.json())
+          : null,
+        needSb
+          ? fetch("/api/fetch-photo", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ keywords, sidebarPrompt, assetType: "sidebar", hasQuoteText, quoteText, brandTokens, width: 360, height: 696, templateId: sidebarTemplate }),
+            }).then((r) => r.json())
+          : null,
       ]);
 
-      // fetch-photo returns [fal] — take the fal result (index 0)
       const ts = new Date().toISOString();
-      const bgUri = bgData.results?.[0]?.dataUri as string | undefined;
-      const sbUri = sbData.results?.[0]?.dataUri as string | undefined;
+      if (needBg) bgUri = bgData?.results?.[0]?.dataUri as string | undefined;
+      if (needSb) sbUri = sbData?.results?.[0]?.dataUri as string | undefined;
       const seamlessId = (bgUri && sbUri) ? generateId() : undefined;
+      const seamlessPairId = (needBg && needSb && bgUri && sbUri) ? generateId() : undefined;
 
       if (bgUri) {
         result.backgroundPng = bgUri;
         addGeneratedImage({ id: generateId(), type: "background", dataUri: bgUri, createdAt: ts, restaurantName: restaurantName || undefined, seamlessId });
+        if (needBg && bgUri.startsWith("data:")) {
+          void addToLibrary({
+            image_type: "background",
+            original_intent: "background",
+            data_uri: bgUri,
+            template_id: backgroundTemplate,
+            concept_tags: libraryTags,
+            restaurant_type: restaurantType ?? undefined,
+            generated_for: restaurantName || undefined,
+            seamless_pair_id: seamlessPairId,
+          }).catch(() => {});
+        }
       }
       if (sbUri) {
         result.sidebarPng = sbUri;
         addGeneratedImage({ id: generateId(), type: "sidebar", dataUri: sbUri, createdAt: ts, restaurantName: restaurantName || undefined, seamlessId });
+        if (needSb && sbUri.startsWith("data:")) {
+          void addToLibrary({
+            image_type: "sidebar",
+            original_intent: "sidebar",
+            data_uri: sbUri,
+            template_id: sidebarTemplate,
+            concept_tags: libraryTags,
+            restaurant_type: restaurantType ?? undefined,
+            generated_for: restaurantName || undefined,
+            seamless_pair_id: seamlessPairId,
+          }).catch(() => {});
+        }
       }
 
       setPreview(result);
@@ -450,6 +573,47 @@ export function BrandingEditor() {
       const seamlessId = generateId();
       addGeneratedImage({ id: generateId(), type: "sidebar", dataUri: sidebarPng, createdAt: ts, restaurantName: restaurantName || undefined, seamlessId });
       addGeneratedImage({ id: generateId(), type: "background", dataUri: backgroundPng, createdAt: ts, restaurantName: restaurantName || undefined, seamlessId });
+
+      const seamlessPairId = generateId();
+      const seamlessStyleTags = styleHints
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, " ")
+        .split(/\s+/)
+        .filter((w) => w.length > 2);
+      const seamlessTags = Array.from(
+        new Set(
+          [
+            ...imageryKeywords.slice(0, 5),
+            ...textureWords.slice(0, 3),
+            ...seamlessStyleTags,
+            restaurantType,
+            restaurantName,
+          ].filter(Boolean) as string[],
+        ),
+      ).map((t) => t.toLowerCase());
+      void Promise.all([
+        addToLibrary({
+          image_type: "background",
+          original_intent: "background",
+          data_uri: backgroundPng,
+          template_id: "flux-seamless-photo",
+          concept_tags: seamlessTags,
+          restaurant_type: restaurantType ?? undefined,
+          generated_for: restaurantName || undefined,
+          seamless_pair_id: seamlessPairId,
+        }),
+        addToLibrary({
+          image_type: "sidebar",
+          original_intent: "sidebar",
+          data_uri: sidebarPng,
+          template_id: "flux-seamless-photo",
+          concept_tags: seamlessTags,
+          restaurant_type: restaurantType ?? undefined,
+          generated_for: restaurantName || undefined,
+          seamless_pair_id: seamlessPairId,
+        }),
+      ]).catch(() => {});
+
       setPreview((prev) => ({ ...prev, sidebarPng, backgroundPng }));
     } catch (err) {
       console.error("Seamless generation failed:", err);
@@ -644,6 +808,24 @@ export function BrandingEditor() {
     setShowLibrary(false);
   }
 
+  function handleLibrarySelect(entry: ImageLibraryEntry) {
+    if (entry.image_type === "sidebar") {
+      updateBranding({ sidebar_picture: entry.public_url });
+    } else {
+      updateBranding({ background_picture: entry.public_url });
+    }
+  }
+
+  function handleLibraryPair(
+    sidebar: ImageLibraryEntry,
+    background: ImageLibraryEntry,
+  ) {
+    updateBranding({
+      sidebar_picture: sidebar.public_url,
+      background_picture: background.public_url,
+    });
+  }
+
   // Group library images: seamless pairs first, then standalone
   const seamlessPairs = (() => {
     const map = new Map<string, { sidebar?: (typeof imageLibrary)[0]; background?: (typeof imageLibrary)[0] }>();
@@ -753,6 +935,25 @@ export function BrandingEditor() {
                     {analyzing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Analyze"}
                   </Button>
                 </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={extractMechanicalPalette}
+                    disabled={extractingPalette || !brandUrl.trim()}
+                    className="flex items-center gap-1.5 rounded border border-emerald-700/50 bg-emerald-950/30 px-2 py-1 text-[10px] text-emerald-300 hover:border-emerald-500 hover:text-emerald-200 disabled:opacity-40"
+                    title="Reads the homepage HTML for <meta name='theme-color'> or --primary/--brand CSS variables. Zero AI cost."
+                  >
+                    {extractingPalette ? (
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                    ) : (
+                      <Palette className="h-3 w-3" />
+                    )}
+                    Extract palette from website (free)
+                  </button>
+                  {paletteMessage && (
+                    <span className="text-[10px] text-slate-500">{paletteMessage}</span>
+                  )}
+                </div>
                 <label className={`flex cursor-pointer items-center gap-1.5 text-[10px] text-slate-500 hover:text-slate-300 ${analyzing ? "pointer-events-none opacity-40" : ""}`}>
                   <Wand2 className="h-3 w-3" />
                   or drop a brand/restaurant photo
@@ -778,6 +979,18 @@ export function BrandingEditor() {
           {/* AI Generate Section */}
           <div className="rounded-lg border border-slate-700 bg-slate-800/50 p-3 space-y-2.5">
             <Label className="text-xs text-slate-400">AI Branding Generator</Label>
+            <TemplateSelector
+              surface="background"
+              value={backgroundTemplate}
+              onChange={setBackgroundTemplate}
+              title="Background template"
+            />
+            <TemplateSelector
+              surface="sidebar"
+              value={sidebarTemplate}
+              onChange={setSidebarTemplate}
+              title="Sidebar template"
+            />
             <Input
               value={styleHints}
               onChange={(e) => setStyleHints(e.target.value)}
@@ -1080,7 +1293,15 @@ export function BrandingEditor() {
             </div>
           </div>
 
-          {/* Image Library */}
+          <LibraryPicker
+            intent="background"
+            onSelect={handleLibrarySelect}
+            onSelectPair={handleLibraryPair}
+            title="Shared Image Library"
+            thumbnailClass="h-20 w-auto"
+          />
+
+          {/* Local (this-session) image library */}
           {imageLibrary.filter((i) => i.type !== "item").length > 0 && (
             <div className="space-y-2">
               <button

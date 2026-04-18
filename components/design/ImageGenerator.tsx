@@ -7,9 +7,7 @@ import {
   Loader2,
   Check,
   X,
-  Trash2,
   Play,
-  Library,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -20,11 +18,16 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { LibraryPicker } from "@/components/ui/LibraryPicker";
+import { TemplateSelector } from "@/components/ui/TemplateSelector";
+import { DEFAULT_TEMPLATE_BY_SURFACE } from "@/lib/generation/templates";
 import { useStore } from "@/store";
 import { generateId } from "@/lib/utils";
 import { svgToPng } from "@/lib/svgToPng";
 import { extractConceptTags, extractFoodCategory } from "@/lib/itemTags";
+import { searchLibrary, addToLibrary } from "@/lib/library/client";
 import type { GeneratedImage } from "@/store/designSlice";
+import type { ImageLibraryEntry } from "@/lib/library/types";
 
 interface ItemImageStatus {
   itemId: string;
@@ -42,17 +45,28 @@ export function ImageGenerator() {
   const restaurantName = useStore((s) => s.restaurantName);
   const imageLibrary = useStore((s) => s.imageLibrary);
   const addGeneratedImage = useStore((s) => s.addGeneratedImage);
-  const deleteGeneratedImage = useStore((s) => s.deleteGeneratedImage);
-  const clearImageLibrary = useStore((s) => s.clearImageLibrary);
   const updateItem = useStore((s) => s.updateItem);
 
   const [styleHints, setStyleHints] = useState("");
   const [recraftStyle, setRecraftStyle] = useState<"vector_illustration" | "digital_illustration">("digital_illustration");
+  const [itemTemplate, setItemTemplate] = useState(DEFAULT_TEMPLATE_BY_SURFACE.item);
   const [generating, setGenerating] = useState(false);
   const [progress, setProgress] = useState<ItemImageStatus[]>([]);
-  const [showLibrary, setShowLibrary] = useState(true);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [showItemPicker, setShowItemPicker] = useState(false);
+
+  const handleLibrarySelect = useCallback(
+    (entry: ImageLibraryEntry) => {
+      const match = items.find(
+        (item) =>
+          !item.posImagePath &&
+          entry.item_name &&
+          item.name.toLowerCase() === entry.item_name.toLowerCase(),
+      );
+      if (match) updateItem(match.id, { posImagePath: entry.public_url });
+    },
+    [items, updateItem],
+  );
 
   const groupMap = new Map(groups.map((g) => [g.id, g]));
 
@@ -63,6 +77,32 @@ export function ImageGenerator() {
       itemName: string,
       groupName: string,
     ): Promise<{ dataUri: string; conceptTags: string[]; foodCategory: string; cuisineType: string } | { error: string }> => {
+      if (itemTemplate === "pull-from-library") {
+        try {
+          const tags = extractConceptTags(itemName, groupName, restaurantType ?? undefined);
+          const category = extractFoodCategory(groupName);
+          const { entries, matched } = await searchLibrary({
+            intent: "item",
+            tags,
+            item_name: itemName,
+            food_category: category,
+            restaurant_type: restaurantType ?? undefined,
+            limit: 1,
+          });
+          if (matched && entries[0]) {
+            const hit = entries[0];
+            return {
+              dataUri: hit.public_url,
+              conceptTags: hit.concept_tags ?? [],
+              foodCategory: hit.food_category ?? category,
+              cuisineType: hit.cuisine_type ?? "general",
+            };
+          }
+        } catch {
+          // Silent fallback — library unavailable, proceed with AI generation.
+        }
+      }
+
       try {
         const res = await fetch("/api/generate-item-image", {
           method: "POST",
@@ -73,6 +113,7 @@ export function ImageGenerator() {
             restaurantType,
             styleHints: styleHints.trim() || undefined,
             recraftStyle,
+            templateId: itemTemplate,
           }),
         });
 
@@ -86,17 +127,33 @@ export function ImageGenerator() {
           ? (data.dataUri as string)
           : await svgToPng(data.svg as string, 90, 90);
 
-        return {
-          dataUri,
-          conceptTags: (data.conceptTags as string[]) || [],
-          foodCategory: (data.foodCategory as string) || "entree",
-          cuisineType: (data.cuisineType as string) || "general",
-        };
+        const conceptTags = (data.conceptTags as string[]) || [];
+        const foodCategory = (data.foodCategory as string) || "entree";
+        const cuisineType = (data.cuisineType as string) || "general";
+
+        // Persist to shared library so future generations hit pull-from-library.
+        // Fire-and-forget — a library save failure must not break the gen flow.
+        void addToLibrary({
+          image_type: "item",
+          original_intent: "item",
+          data_uri: dataUri,
+          template_id: itemTemplate,
+          item_name: itemName,
+          concept_tags: conceptTags,
+          cuisine_type: cuisineType,
+          food_category: foodCategory,
+          restaurant_type: restaurantType ?? undefined,
+          generated_for: restaurantName || undefined,
+        }).catch(() => {
+          /* library unavailable — leave it, gen succeeded regardless */
+        });
+
+        return { dataUri, conceptTags, foodCategory, cuisineType };
       } catch (err) {
         return { error: (err as Error).message };
       }
     },
-    [restaurantType, styleHints, recraftStyle],
+    [restaurantType, restaurantName, styleHints, recraftStyle, itemTemplate],
   );
 
   async function generateAll() {
@@ -173,12 +230,6 @@ export function ImageGenerator() {
     );
     await Promise.all(workers);
     setGenerating(false);
-  }
-
-  function assignImageToItem(itemId: string, dataUri: string) {
-    // Store the data URI as a "virtual" posImagePath that the deployer
-    // will handle as a pending image transfer
-    updateItem(itemId, { posImagePath: dataUri });
   }
 
   function scoreMatch(
@@ -265,6 +316,12 @@ export function ImageGenerator() {
             <Label className="text-xs text-slate-400">
               AI Image Generator
             </Label>
+            <TemplateSelector
+              surface="item"
+              value={itemTemplate}
+              onChange={setItemTemplate}
+              title="Item icon template"
+            />
             <div className="flex items-center gap-1.5">
               <span className="text-[9px] text-slate-600">Style:</span>
               {(["vector_illustration", "digital_illustration"] as const).map((s) => (
@@ -447,78 +504,15 @@ export function ImageGenerator() {
         </CardContent>
       </Card>
 
-      {/* Image Library */}
       <Card>
-        <CardHeader className="pb-3">
-          <CardTitle className="flex items-center justify-between text-base">
-            <button
-              className="flex items-center gap-2"
-              onClick={() => setShowLibrary(!showLibrary)}
-            >
-              <Library className="h-4 w-4 text-purple-400" />
-              Image Library ({itemImages.length})
-            </button>
-            {itemImages.length > 0 && (
-              <button
-                onClick={() => clearImageLibrary("item")}
-                className="flex items-center gap-1 text-xs text-slate-500 hover:text-red-400"
-              >
-                <Trash2 className="h-3 w-3" />
-                Clear all
-              </button>
-            )}
-          </CardTitle>
-        </CardHeader>
-        {showLibrary && itemImages.length > 0 && (
-          <CardContent>
-            <div className="grid grid-cols-6 gap-2 sm:grid-cols-8 md:grid-cols-10">
-              {itemImages.map((img) => {
-                // Find matching item to show assignment state
-                const assigned = items.find(
-                  (item) => item.posImagePath === img.dataUri,
-                );
-                return (
-                  <div
-                    key={img.id}
-                    className={`group relative overflow-hidden rounded-lg border ${
-                      assigned
-                        ? "border-green-500/50 ring-1 ring-green-500/30"
-                        : "border-slate-700 hover:border-blue-500/50"
-                    }`}
-                  >
-                    <img
-                      src={img.dataUri}
-                      alt={img.itemName || ""}
-                      className="h-full w-full cursor-pointer"
-                      title={`${img.itemName || "Unknown"}${assigned ? " (assigned)" : " — click to assign"}`}
-                      onClick={() => {
-                        // Find the matching item and assign
-                        const match = items.find(
-                          (item) =>
-                            !item.posImagePath &&
-                            item.name.toLowerCase() ===
-                              img.itemName?.toLowerCase(),
-                        );
-                        if (match) {
-                          assignImageToItem(match.id, img.dataUri);
-                        }
-                      }}
-                    />
-                    <div className="absolute bottom-0 left-0 right-0 hidden truncate bg-black/80 px-1 py-0.5 text-[8px] text-slate-300 group-hover:block">
-                      {img.itemName || "?"}
-                    </div>
-                    <button
-                      onClick={() => deleteGeneratedImage(img.id)}
-                      className="absolute right-0.5 top-0.5 hidden rounded bg-black/70 p-0.5 text-red-400 hover:text-red-300 group-hover:block"
-                    >
-                      <Trash2 className="h-2.5 w-2.5" />
-                    </button>
-                  </div>
-                );
-              })}
-            </div>
-          </CardContent>
-        )}
+        <CardContent className="pt-6">
+          <LibraryPicker
+            intent="item"
+            onSelect={handleLibrarySelect}
+            title="Shared Image Library"
+            thumbnailClass="h-16 w-16"
+          />
+        </CardContent>
       </Card>
     </div>
   );

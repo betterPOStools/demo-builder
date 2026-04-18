@@ -405,5 +405,45 @@ export function buildDesignConfig(opts: BuildDesignConfigOptions): DesignConfigV
     };
   }
 
+  // WCAG AA contrast enforcement. If buttons_font_color doesn't have a 4.5:1
+  // ratio vs buttons_background_color, force it to whichever of white/black
+  // has the better ratio. Catches AI overrides like "#EEEEEE on #999999".
+  config.branding = enforceButtonContrast(config.branding);
+
   return config;
+}
+
+// WCAG relative luminance (https://www.w3.org/WAI/GL/wiki/Relative_luminance)
+function luminance(hex: string): number {
+  const h = hex.replace("#", "");
+  if (h.length !== 6) return 0;
+  const [r, g, b] = [0, 2, 4].map((i) => {
+    const v = parseInt(h.slice(i, i + 2), 16) / 255;
+    return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+  });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+function contrast(a: string, b: string): number {
+  const la = luminance(a);
+  const lb = luminance(b);
+  return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
+}
+
+function enforceButtonContrast<T extends {
+  buttons_background_color?: string | null;
+  buttons_font_color?: string | null;
+}>(branding: T): T {
+  const bg = branding.buttons_background_color;
+  const fg = branding.buttons_font_color;
+  if (!bg || !fg || !/^#[0-9a-f]{6}$/i.test(bg) || !/^#[0-9a-f]{6}$/i.test(fg)) {
+    return branding;
+  }
+  const ratio = contrast(bg, fg);
+  if (ratio >= 4.5) return branding;
+  // Pick whichever of white/black has better contrast against bg
+  const whiteRatio = contrast(bg, "#FFFFFF");
+  const blackRatio = contrast(bg, "#000000");
+  const better = whiteRatio >= blackRatio ? "#FFFFFF" : "#000000";
+  return { ...branding, buttons_font_color: better };
 }

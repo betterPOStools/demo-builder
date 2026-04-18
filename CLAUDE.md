@@ -51,10 +51,22 @@ Data flows through Zustand store:
 ## Key Features
 
 ### AI Image Generation
-- **Item images:** `POST /api/generate-item-image` — Claude Haiku generates 90×90px SVG icons with transparent backgrounds; converted to PNG via `lib/svgToPng.ts`
-- **Branding:** `POST /api/generate-branding` — returns HTML/CSS `<div>` for sidebar (70×600px) or background (800×600px); rasterized client-side via `lib/htmlToPng.ts` (html2canvas)
-- **Color palette:** same route, `type: "palette"` — returns `{ background, buttons_background_color, buttons_font_color }`
-- Images stored as data URIs in Zustand `imageLibrary`; auto-assign matches by item name
+- **Item images:** `POST /api/generate-item-image` — accepts `templateId` (Recraft V3 primary, FLUX Schnell or Claude SVG via template). Returns data URI.
+- **Branding/background/sidebar:** `POST /api/fetch-photo` — accepts `templateId`; dispatches to FLUX Pro, Ideogram V3 (REALISTIC or DESIGN), or Unsplash.
+- **HTML/CSS collage:** `POST /api/generate-branding` — Claude Sonnet renders HTML/CSS, rasterized client-side via `lib/htmlToPng.ts` (html2canvas); also serves `type: "palette"` for AI color extraction.
+- **Mechanical palette (free):** `POST /api/extract-palette` — regex-based extraction of brand colors from a restaurant homepage, port of `agent/pipeline_shared.py:_extract_branding_mechanical`. No AI spend.
+- Generated images save back to the shared library automatically (fire-and-forget).
+
+### Shared Image Library
+Cross-device image store backed by Supabase Storage bucket `image-library` + `demo_builder.image_library` table (migration 011). Replaces per-browser IndexedDB.
+
+- **Routes:** `/api/library` (GET/POST/DELETE) + `/api/library/search?intent=&tags=&limit=` (scored match over concept_tags + cuisine + food_category).
+- **Storage:** content-hashed paths (`<intent>/<sha256>.<ext>`) give natural dedup; public-read.
+- **UI:** `components/ui/LibraryPicker.tsx` (filter pills + grid) and `components/ui/TemplateSelector.tsx` (horizontal card strip) embedded in `BrandingEditor` and `ImageGenerator`.
+- **Pull-from-library preflight:** When the selected template is `pull-from-library` (default), the UI calls `/api/library/search` before any AI route; on hit, uses the library entry's public URL; on miss, falls through to the AI template chosen.
+
+### Generation Template Registry (`lib/generation/templates.ts`)
+Static Record of ~15 templates. Each has `id`, `surfaces`, `model`, `kind`, `wired`. The four generation routes (`generate-item-image`, `fetch-photo`, `generate-branding`, `generate-logo-sidebar`) accept a `templateId` and dispatch accordingly. Prompt variants for FLUX Pro style modes live in `lib/generation/promptBuilders.ts` (riso, blobby-gradient, maximalist-pattern, etc.).
 
 ### Deploy Agent (`agent/deploy_agent.py`)
 - Runs as launchd service: `com.valuesystems.demo-builder-agent`
@@ -94,6 +106,8 @@ Supabase PROD (`nngjtbrvwhjrmbokephl`) went down 2026-04-10 — oversized JSONB 
 - **Tables (schema `demo_builder`):**
   - `sessions` — project sessions: `generated_sql`, `pending_images JSONB`, `deploy_target JSONB`, `deploy_status`, `deploy_result JSONB`
   - `connections` — saved MariaDB targets
+  - `image_library` — shared cross-device image store (migration 011): `storage_path`, `image_type`, `original_intent`, `template_id`, `concept_tags TEXT[]`, `seamless_pair_id`, etc.
+- **Storage buckets:** `image-library` (public-read) — bytes for shared library entries
 - `sessions.pending_images` — JSON array of `{ name, image_url, dest_path }` (**snake_case** — critical, agent reads these field names)
 - `sessions.deploy_target` — `{ host, port, database, user, password }` or null
 - **Image payload fix:** Stage route uploads data URIs to Vercel Blob before upserting to Supabase — stores URL (~100 bytes) not raw base64 (~60KB). Prevents JSONB statement timeout.

@@ -1,3 +1,5 @@
+import { buildFluxPrompt } from "@/lib/generation/promptBuilders";
+
 export const maxDuration = 60;
 
 interface CompareResult {
@@ -49,6 +51,60 @@ async function downloadToDataUri(imageUrl: string): Promise<string> {
   const base64 = Buffer.from(arrayBuffer).toString("base64");
   const contentType = res.headers.get("content-type") || "image/webp";
   return `data:${contentType};base64,${base64}`;
+}
+
+// ─── fal.ai — Ideogram V3 DESIGN poster ──────────────────────────────────────
+
+async function fetchIdeogramDesign(
+  prompt: string,
+  width: number,
+  height: number,
+): Promise<CompareResult> {
+  const falKey = process.env.FAL_KEY;
+  if (!falKey) {
+    return {
+      source: "ideogram",
+      label: "fal.ai (Ideogram V3 Design)",
+      dataUri: null,
+      error: "Add FAL_KEY to Vercel env vars",
+    };
+  }
+  try {
+    const aspectRatio = width >= height ? "16:9" : "1:2";
+    const res = await fetch("https://fal.run/fal-ai/ideogram/v3", {
+      method: "POST",
+      headers: {
+        Authorization: `Key ${falKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        prompt,
+        aspect_ratio: aspectRatio,
+        rendering_speed: "QUALITY",
+        style_type: "DESIGN",
+      }),
+      signal: AbortSignal.timeout(55000),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
+    }
+    const data = (await res.json()) as { images?: { url: string }[] };
+    const imageUrl = data.images?.[0]?.url;
+    if (!imageUrl) throw new Error("No image URL in Ideogram V3 response");
+    return {
+      source: "ideogram",
+      label: "fal.ai (Ideogram V3 Design)",
+      dataUri: await downloadToDataUri(imageUrl),
+    };
+  } catch (e) {
+    return {
+      source: "ideogram",
+      label: "fal.ai (Ideogram V3 Design)",
+      dataUri: null,
+      error: (e as Error).message,
+    };
+  }
 }
 
 // ─── fal.ai — FLUX Pro background ────────────────────────────────────────────
@@ -219,6 +275,7 @@ export async function POST(request: Request) {
       brandTokens?: Record<string, unknown>;
       width: number;
       height: number;
+      templateId?: string;
     };
     const {
       keywords,
@@ -230,16 +287,26 @@ export async function POST(request: Request) {
       brandTokens,
       width,
       height,
+      templateId,
     } = body;
 
-    const bgPromptBase =
+    const bgPromptBase = buildFluxPrompt(
+      templateId,
       (brandTokens?.flux_scene_prompt as string | undefined) ||
-      backgroundPrompt ||
-      keywords.join(", ");
+        backgroundPrompt ||
+        keywords.join(", "),
+    );
 
     let falResult: Promise<CompareResult>;
 
-    if (assetType === "seamless") {
+    if (templateId === "ideogram-v3-design-poster") {
+      // Design poster template routes to Ideogram V3 DESIGN regardless of surface.
+      const posterPrompt =
+        assetType === "background"
+          ? `${bgPromptBase} Compose with the main subject and focal interest in the right 70% of the frame — the leftmost 30% will be covered by a sidebar panel.`
+          : bgPromptBase;
+      falResult = fetchIdeogramDesign(posterPrompt, width, height);
+    } else if (assetType === "seamless") {
       // Plain background — no focal point or composition hints. The sidebar
       // overlay is cropped from this same image client-side via splitFromDataUri.
       falResult = fetchFalBackground(
@@ -259,6 +326,12 @@ export async function POST(request: Request) {
       );
     } else {
       // sidebar
+      const sidebarFluxPrompt = buildFluxPrompt(
+        templateId,
+        (brandTokens?.flux_sidebar_prompt as string | undefined) ||
+          sidebarPrompt ||
+          keywords.join(", "),
+      );
       falResult = fetchFalSidebar(
         hasQuoteText
           ? ((brandTokens?.ideogram_sidebar_prompt as string | undefined)
@@ -267,7 +340,7 @@ export async function POST(request: Request) {
                   quoteText ?? "",
                 )
               : sidebarPrompt || keywords.join(", "))
-          : ((brandTokens?.flux_sidebar_prompt as string | undefined) || sidebarPrompt || keywords.join(", ")),
+          : sidebarFluxPrompt,
         width,
         height,
         hasQuoteText,

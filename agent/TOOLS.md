@@ -156,6 +156,151 @@ Same stripping applied to `raw_text` in `advance_stage_extract()`.
 
 ---
 
+## analyze_failures.py
+
+**Path:** `agent/analyze_failures.py`
+**Purpose:** Categorize failed `batch_queue` rows without re-running AI, so failures drive root-cause fixes (upstream URL pruning, code change) instead of blanket retries.
+
+**What it achieves:** Groups failed rows by error pattern + URL class + restaurant-type distribution. Emits a report + optional CSV dump. Never calls Anthropic.
+
+**Inputs:** `SUPABASE_URL`, `SUPABASE_KEY` from `agent/.env`.
+
+**Flags:** `--csv <path>`, `--sample N` (show N URLs per category), `--status <name>` (default: failed).
+
+**Constraints & iteration history:**
+- Core principle from 2026-04-15: failures get analysis, not auto-retry. See `memory/feedback_failures_never_auto_retry.md`.
+- Error categorization is regex-based over `batch_queue.error`. Add new buckets as new failure modes appear.
+
+---
+
+## test_extract.py
+
+**Path:** `agent/test_extract.py`
+**Purpose:** Single-query extraction tester for iterating on fetch logic and prompts without submitting a batch.
+
+**What it achieves:** Runs the full fetch → Haiku extract pipeline against one URL (or batch_queue row id, or a file of URLs) and prints item count + first few items. ~20s per URL vs. ~10 min batch roundtrip.
+
+**Inputs:** `SUPABASE_URL`, `SUPABASE_KEY`, `ANTHROPIC_API_KEY`.
+
+**Flags:** `<url>`, `--row <id>`, `--urls-file <path>`.
+
+**Constraints & iteration history:**
+- Imports from `batch_pipeline.py` / `pipeline_shared.py` — changes to the prod pipeline are automatically tested. See `memory/feedback_test_single_query_before_batch.md`.
+
+---
+
+## rebuild_batch.py
+
+**Path:** `agent/rebuild_batch.py`
+**Purpose:** Single-shot rebuild CLI (PR1 scope: preflight-only dry-run). Classifies every `batch_queue` row mechanically before any AI call — writes `preflight JSONB` + tags with `rebuild_run_id`, counts buckets, projects AI cost.
+
+**What it achieves:** Replaces the wave-based staged pipeline in `deploy_agent.py` for bulk rebuilds. PR1 populates preflight verdicts + bucket summary. PR3 will add stage batch submission (one Anthropic batch per stage-dependency boundary). Non-dry-run invocations currently hard-error.
+
+**Inputs:** `SUPABASE_URL`, `SUPABASE_KEY` from `agent/.env`. Requires migration `010_preflight_column.sql` applied.
+
+**Flags:** `--run-id <uuid>` (default: new uuid), `--limit N`, `--yes` (rejected in PR1).
+
+**Constraints & iteration history:**
+- PR1 is read-only classification. No status mutation, no AI spend.
+- Mechanical verdict shape covers url_class, fetch_status, menu_url_candidate, ldjson_items, branding_tokens, image_menu_urls, content_gate_verdict, ai_needed[].
+- See `agent/REFACTOR_PLAN.md` for the three-PR sequence.
+
+---
+
+## rebuild_all.py
+
+**Path:** `agent/rebuild_all.py`
+**Purpose:** Destructive full-corpus reset: flips every `batch_queue` row back to `queued` and clears every derived field so the agent reprocesses from scratch through the current pipeline.
+
+**What it achieves:** Fresh cost data + fresh output quality on the whole corpus. Required when pipeline improvements (menu-index follower, image-menu, WCAG, zero-price flip) need to be applied to already-shipped rows.
+
+**Inputs:** same env as `deploy_agent.py`. `~/Projects/demo-DBs/` optional snapshot dir.
+
+**Flags:** `--yes` (commit — without it, prints counts only), `--exclude-done` (preserve sessions.deploy_status='done' rows).
+
+**Constraints & iteration history:**
+- Orphans `sessions` rows linked via `session_id` — do not run mid-demo. See `memory/feedback_rebuild_preserves_existing_sessions.md`.
+- pt_record_id prefix caveat: batch_queue stores bare ChIJ..., sessions prepend `db_`. `--exclude-done` joins with prepend.
+
+---
+
+## fix_contrast.py
+
+**Path:** `agent/fix_contrast.py`
+**Purpose:** Retroactively repair WCAG-AA contrast violations on already-deployed demo snapshots and Supabase `sessions.generated_sql` rows.
+
+**What it achieves:** For each SQL file in `~/Projects/demo-DBs/` and each session in Supabase, parses the `ButtonsBackgroundColor` + `ButtonsFontColor` UPDATEs, computes the WCAG contrast ratio, and rewrites the font colour to `#FFFFFF` or `#000000` (whichever has the higher ratio) when the existing combo is below 4.5. Idempotent — no-ops on already-fixed rows.
+
+**Inputs:** `NEXT_PUBLIC_SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` from `../.env.local`. Snapshot dir: `~/Projects/demo-DBs/`.
+
+**Flags:** `--yes` (commit), `--snapshots-only`, `--sessions-only`. Dry-run is the default.
+
+**Constraints & iteration history:**
+- Original pipeline could produce AI-generated palettes like white-on-grey that failed WCAG AA — see `memory/feedback_wcag_button_contrast.md`. The root fix now lives in the pipeline (`lib/presets/typePalettes.ts` hardcoded contrast-safe pairs + the extractor clamps at AA). This script cleans up the pre-fix corpus.
+- SQL rewrite is purely regex-based — no parsing of the full dump. Safe because the two target UPDATE lines are predictable.
+
+---
+
+## fix_price_nulls.py
+
+**Path:** `agent/fix_price_nulls.py`
+**Purpose:** Retroactively flip `IsOpenPriceItem = 1` on deployed items whose `DefaultPrice` ended up NULL/0, so the POS prompts the cashier instead of ringing $0.
+
+**What it achieves:** Scans `~/Projects/demo-DBs/*.sql` + Supabase `sessions.generated_sql`. For every `menuitems` INSERT row where the default-price column is 0 or NULL, rewrites the `IsOpenPriceItem` column to `1`. Idempotent.
+
+**Inputs:** same env as `fix_contrast.py`. Snapshot dir: `~/Projects/demo-DBs/`.
+
+**Flags:** `--yes` (commit), `--snapshots-only`, `--sessions-only`.
+
+**Constraints & iteration history:**
+- Root fix is in `lib/sql/deployer.ts` (auto-flip at SQL-generation time). This script handles the already-shipped corpus.
+- Regex key: column index 12 (0-indexed) of the `INSERT INTO menuitems VALUES (...)` row is `IsOpenPriceItem`. Must count commas accurately — single-quoted strings can contain commas (e.g. `'Chips, Salsa'`) so the regex has to walk the value list with quote-awareness.
+
+---
+
+## retag_library.py
+
+**Path:** `agent/retag_library.py`
+**Purpose:** Backfill / enrich `concept_tags` on existing `demo_builder.image_library` rows so tag-based search (`/api/library/search`) surfaces cross-restaurant matches for library-pulled image re-use.
+
+**What it achieves:** Raises the average tag count and vocabulary diversity on library entries that were seeded before the 2026-04-16 tag-enrichment rules shipped. First observed run: 133 rows averaged 5.5 tags with a 150-term vocabulary and zero rows had `food_category`; after two passes it's 8.6 avg tags, 362-term vocabulary, 131/133 with `food_category`.
+
+**Modes:**
+
+- `--pass 1` — deterministic, free. Re-tokenises `item_name`, strips noise words (`favorite`, `lexi`, `original`, etc.), fixes the unicode artefact `jalape → jalapeno`, inferred regex categories add semantic tags (`seafood` on "Blackened Mahi", `mexican` on "Quesadilla", `beef` on "Cheesesteak"), and populates `food_category` from an item-name keyword table.
+- `--pass 2` — Haiku 4.5 vision. Only fires on rows still under `MIN_TAGS=6` after pass 1. Fetches the image bytes from the public `image-library` bucket, sends with matching `media_type`, parses a JSON array of 6–10 tags, merges. Webp/png/jpeg/gif supported; SVGs are skipped (Anthropic vision doesn't accept SVG — see `memory/feedback_anthropic_vision_formats.md`).
+- `--pass both --commit` — runs both back-to-back.
+
+**Inputs / env vars (from `agent/.env`, same shape as `deploy_agent.py`):**
+
+| Var | Required | Purpose |
+|-----|----------|---------|
+| `SUPABASE_URL` | ✅ | Supabase REST URL |
+| `SUPABASE_KEY` | ✅ | Service role key (read + PATCH on `image_library`) |
+| `ANTHROPIC_API_KEY` | for pass 2 | Claude Haiku 4.5 key |
+
+**Flags:**
+
+- `--commit` (default off) — actually PATCH rows. Otherwise dry-run with a per-row diff.
+- `--limit N` — cap rows processed (handy for testing).
+- `--pass {1|2|both}` — which pass(es) to run.
+
+**Constraints & iteration history:**
+
+- **Rejected: single Haiku pass over every row.** ~$0.53 for 133 rows with zero information gain on icons whose `item_name` already determines the category. The deterministic pass is strictly cheaper and handles the majority of the lift. Vision stays gated behind `MIN_TAGS`.
+- **Rejected: LLM-based tokenisation of `item_name`.** Same argument — regex catches 90% of the cases and does it deterministically.
+- **Rejected: running a single `lib/itemTags.ts` TS port directly.** Only way to run the existing TS logic from here is via `npx tsx`; the regex set needed to grow anyway (cross-cuisine tags like "seafood" on "mahi"), and Python is the rest of the batch-pipeline lingua franca.
+- **Gotcha: SVG unsupported by Claude vision.** Initial run got HTTP 400 `"Could not process image"` on every row. Fix: `EXT_MEDIA` lookup + skip SVG rows with a log line. Only 3 SVG rows in the library were eligible — acceptable loss.
+- **Gotcha: wrong `media_type`.** First cut hardcoded `"image/png"` / fallback `"image/jpeg"`. WebP files sent as JPEG → HTTP 400. Fixed by extension lookup before the call.
+- **Dry-run semantics.** Pass 2 in dry-run mode queries the live rows; it does not re-read anything pass 1 would have modified, so dry-run-both can over-report the target set if pass 1 would have pushed rows past `MIN_TAGS`. To get an accurate preview of pass 2 after pass 1, run `--pass 1 --commit` first then `--pass 2` in dry-run.
+
+**Known issues:**
+
+- 3 SVG rows stay under `MIN_TAGS=6`. Could rasterize with `cairosvg` if it matters; today it doesn't.
+- Threshold `MIN_TAGS` is hardcoded at 6; if you want a richer library, bump it (more rows go through vision, linearly more cost).
+
+---
+
 # PT Prospect Ranking (serves Prospect Tracker)
 
 AI-driven prospect ranker for the Prospect Tracker app. Classifies restaurants from
