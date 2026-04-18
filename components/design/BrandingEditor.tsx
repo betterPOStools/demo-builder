@@ -520,12 +520,17 @@ export function BrandingEditor() {
 
   async function remixLogo(img: GeneratedImage) {
     const promptText = window.prompt(
-      "Describe the remix style (e.g. 'clean vector, flat colors, brand palette'):",
-      "clean modern vector logo, flat colors, transparent background",
+      "Describe the remix style (how the new logo should look):",
+      "reinterpret as bold sticker-style logo with thick outlines and vibrant colors",
     );
     if (!promptText?.trim()) return;
+    const strengthStr = window.prompt(
+      "How much to change? 0.5 = subtle tweak, 0.9 = strong remix, 0.99 = almost full regen",
+      "0.9",
+    );
+    const strength = Math.max(0.1, Math.min(0.99, parseFloat(strengthStr ?? "0.9") || 0.9));
     setGenerating(true);
-    setGenProgress("Remixing logo...");
+    setGenProgress(`Remixing logo (strength ${strength})...`);
     try {
       const res = await fetch("/api/remix-logo", {
         method: "POST",
@@ -533,7 +538,7 @@ export function BrandingEditor() {
         body: JSON.stringify({
           imageDataUri: img.dataUri,
           prompt: promptText.trim(),
-          strength: 0.7,
+          strength,
         }),
       });
       const data = await res.json();
