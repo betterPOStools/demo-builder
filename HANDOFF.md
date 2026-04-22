@@ -1,14 +1,45 @@
 # Demo Builder — Handoff
 
-**Last updated:** 2026-04-16
-**Status:** [IN PROGRESS] — Failure analysis complete. 744+ done, 3 bugs fixed, 57+ rows requeued. 747 SQL snapshots.
+**Last updated:** 2026-04-22
+**Status:** [IN PROGRESS] — Deploy agent re-enabled and pushing sessions to tablet. Batch pipeline still manual CLI only. RLS hardening complete on DEV.
 
 ## Current state
 
 - App deployed + stable. Supabase DEV (`mqifktmmyiqzrolrvsmy`), schema `demo_builder`, Vercel-hosted.
-- Deploy agent running as `com.valuesystems.demo-builder-agent` (launchd), polling every 5s.
-- **744 done** / 861 failed of 1,605 (57 rows requeued from failure analysis session).
+- Deploy agent running as `com.valuesystems.demo-builder-agent` (launchd), polling every 5s. **Re-enabled 2026-04-21.**
+- **744+ done** / 861 failed of 1,605 (57 rows requeued from last failure analysis session).
 - 747 SQL snapshots in `~/Projects/demo-DBs/` (backfilled 80 missing via `agent/backfill_snapshots.py`).
+
+## Recent session (2026-04-22) — Supabase RLS hardening
+
+**Trigger:** Supabase security advisor email flagging `rls_disabled_in_public` + `sensitive_columns_exposed` on both PROD and DEV.
+
+**Changes:**
+- `supabase/migrations/015_remaining_tables_rls.sql` — enable RLS on all 6 `demo_builder` tables with service_role-only policy. Pushed to DEV (`mqifktmmyiqzrolrvsmy`) and verified.
+- `agent/pipeline_shared.py` — replaced `os.environ.setdefault()` with direct assignment in `load_env()` so `.env` file always wins over launchd global env. Added fail-fast `RuntimeError` if `SUPABASE_URL` points to wrong project ref.
+
+**Verified after migration 015:**
+- `demo_builder.connections` (MariaDB passwords): service_role sees 1 row, anon sees 0 ✅
+- `demo_builder.sessions` (1252 rows): anon-blocked ✅
+- All 5 other `demo_builder` tables: anon-blocked ✅
+
+**PROD (`nngjtbrvwhjrmbokephl`) still pending Aaron's sign-off** — demo_builder.sessions and connections are anon-readable on PROD. Migration ready; awaiting authorization.
+
+**Root cause of launchd contamination:** `launchctl setenv SUPABASE_URL=mqgjrfgbiqmmvsjfgoya` (set by rezd install.sh) polluted all launchd processes. `setdefault()` let the global var win. Fix: direct `os.environ[key] = val` overwrite in `load_env()` + project-ref assertion. See commit `f68218a`.
+
+## Recent session (2026-04-21) — Deploy agent re-enable
+
+**Problem:** Deploy agent (`com.valuesystems.demo-builder-agent`) was stuck in a crash loop. Two separate blockers:
+
+1. **Governor `allow_daemon: false`** — `deploy_agent.py` imports the governor wrapper at startup as a guard, and `apps.yaml` had no `allow_daemon: true` for this app. Fixed by setting `allow_daemon: true` in `batch-governor/config/apps.yaml`. Note: the original burn was from the old inline batch pipeline; the current deploy_agent has zero Anthropic calls — the guard is a backstop.
+
+2. **Wrong Supabase URL from global launchd env** — A `launchctl setenv SUPABASE_URL` was pointing to `mqgjrfgbiqmmvsjfgoya` (agent-rpc project). `pipeline_shared.py` uses `os.environ.setdefault`, so the `.env` value lost to the global env → 401 errors. Fixed by pinning `SUPABASE_URL=https://mqifktmmyiqzrolrvsmy.supabase.co` in the launchd plist's `EnvironmentVariables` block.
+
+**Result:** Agent running at PID ~57000, polling correctly. Sessions 37c476a0 (972 SQL rows) and 9bb1405c (1083 SQL rows) deployed to tablet successfully. POS restart via PsExec showed "Not running after 60s — may need UAC approval on tablet" (non-fatal warning; POS may still have launched, UAC prompt waits on tablet screen).
+
+**Key files changed:**
+- `batch-governor/config/apps.yaml` — `allow_daemon: true` for `demo-builder-deploy-agent`
+- `~/Library/LaunchAgents/com.valuesystems.demo-builder-agent.plist` — SUPABASE_URL pinned (not in repo)
 
 ## Recent session (2026-04-16) — Failure analysis + bug fixes
 
