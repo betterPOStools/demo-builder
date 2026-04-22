@@ -29,8 +29,11 @@ import requests
 # Config + env loading
 # ---------------------------------------------------------------------------
 
+_EXPECTED_SUPABASE_REF = "mqifktmmyiqzrolrvsmy"
+
+
 def load_env():
-    """Load .env file if present. Idempotent — uses os.environ.setdefault."""
+    """Load .env file if present. File values overwrite env to prevent launchd contamination."""
     env_path = os.path.join(os.path.dirname(__file__), ".env")
     if os.path.exists(env_path):
         with open(env_path) as f:
@@ -38,13 +41,25 @@ def load_env():
                 line = line.strip()
                 if line and not line.startswith("#") and "=" in line:
                     key, _, val = line.partition("=")
-                    os.environ.setdefault(key.strip(), val.strip().strip('"').strip("'"))
+                    # INTENTIONAL: direct assignment (not setdefault) so the .env file
+                    # always wins over launchd global env vars (launchctl setenv pollution).
+                    os.environ[key.strip()] = val.strip().strip('"').strip("'")
 
 load_env()
 
 SUPABASE_URL      = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY      = os.environ.get("SUPABASE_KEY", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+
+# Fail fast if the URL points to the wrong project — catches launchd contamination
+# before any writes happen.
+if SUPABASE_URL and _EXPECTED_SUPABASE_REF not in SUPABASE_URL:
+    raise RuntimeError(
+        f"pipeline_shared: SUPABASE_URL points to wrong project.\n"
+        f"  Expected ref: {_EXPECTED_SUPABASE_REF}\n"
+        f"  Got:          {SUPABASE_URL}\n"
+        "Check launchd env: launchctl getenv SUPABASE_URL"
+    )
 
 HEADERS = {
     "apikey": SUPABASE_KEY,
