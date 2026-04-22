@@ -1,7 +1,7 @@
 # Demo Builder — Handoff
 
 **Last updated:** 2026-04-22
-**Status:** [IN PROGRESS] — Deploy agent re-enabled and pushing sessions to tablet. Batch pipeline still manual CLI only. RLS hardening complete on DEV.
+**Status:** [IN PROGRESS] — Deploy agent re-enabled and pushing sessions to tablet. Batch pipeline still manual CLI only. RLS hardening complete on DEV + PROD.
 
 ## Current state
 
@@ -23,7 +23,7 @@
 - `demo_builder.sessions` (1252 rows): anon-blocked ✅
 - All 5 other `demo_builder` tables: anon-blocked ✅
 
-**PROD (`nngjtbrvwhjrmbokephl`) still pending Aaron's sign-off** — demo_builder.sessions and connections are anon-readable on PROD. Migration ready; awaiting authorization.
+**PROD (`nngjtbrvwhjrmbokephl`) complete** — RLS applied directly via Supabase SQL editor on 2026-04-22. Tables hardened: `sessions`, `connections`, `usage_logs` (service_role-only policy). `batch_queue` does not exist on PROD. Password rotation for `connections` rows declined by Aaron.
 
 **Root cause of launchd contamination:** `launchctl setenv SUPABASE_URL=mqgjrfgbiqmmvsjfgoya` (set by rezd install.sh) polluted all launchd processes. `setdefault()` let the global var win. Fix: direct `os.environ[key] = val` overwrite in `load_env()` + project-ref assertion. See commit `f68218a`.
 
