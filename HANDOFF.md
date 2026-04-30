@@ -1,14 +1,19 @@
 # Demo Builder — Handoff
 
-**Last updated:** 2026-04-22
-**Status:** [IN PROGRESS] — Deploy agent re-enabled and pushing sessions to tablet. Batch pipeline still manual CLI only. RLS hardening complete on DEV + PROD.
+**Last updated:** 2026-04-30
+**Status:** [IN PROGRESS] — Deploy agent DISABLED (plist in disabled/). Batch pipeline manual CLI only. RLS hardening complete on DEV + PROD. Failure taxonomy analysis complete (2026-04-30).
 
 ## Current state
 
 - App deployed + stable. Supabase DEV (`mqifktmmyiqzrolrvsmy`), schema `demo_builder`, Vercel-hosted.
-- Deploy agent running as `com.valuesystems.demo-builder-agent` (launchd), polling every 5s. **Re-enabled 2026-04-21.**
-- **744+ done** / 861 failed of 1,605 (57 rows requeued from last failure analysis session).
+- Deploy agent (`com.valuesystems.demo-builder-agent`) **DISABLED** — plist moved to `~/Library/LaunchAgents/disabled/`.
+- **batch_queue:** 495 done / 1,072 failed of 1,598 total. See `docs/failure-taxonomy.md` for full breakdown.
+- **sessions (deploy):** 13 done / 1,238 idle (assembled, not yet deployed) / 1 failed (tablet unreachable) of 1,253.
 - 747 SQL snapshots in `~/Projects/demo-DBs/` (backfilled 80 missing via `agent/backfill_snapshots.py`).
+
+## Recent session (2026-04-30) — Failure taxonomy analysis
+
+Full analysis at `docs/failure-taxonomy.md`. Of 1,072 failed `batch_queue` rows: **262 are retryable as-is** (batch canceled: 90, network fetch: 78, batch errored: 69 with a one-line guard fix, malformed JSON: 8, PDF errored: 8, image-menu errored: 9). The remaining 810 require technique improvements — 368 extracted zero items (need better prompts or image fallback), 336 found no menu URL (need discovery prompt improvements), 51 were Cloudflare-blocked (need Playwright fetch), and 55 were correctly rejected by the content gate (no price signals). The deploy pipeline has 1 failed session (tablet connection timeout — transient). **Immediate action:** requeue the 90 batch-canceled rows and 78 network-fetch rows to `queued` — these are the fastest wins.
 
 ## Recent session (2026-04-22) — Supabase RLS hardening
 
